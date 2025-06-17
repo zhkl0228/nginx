@@ -9,6 +9,7 @@
 #include <ngx_stream.h>
 #include <ngx_md5.h>
 
+#define PROLOGUE_SIZE 32
 
 typedef struct {
     ngx_flag_t      enabled;
@@ -45,6 +46,8 @@ typedef struct {
     ngx_pool_t     *pool;
     ngx_uint_t      state;
     ngx_ssl_ja3_t   ja3;
+    u_char          prologue[PROLOGUE_SIZE];
+    size_t          prologue_sz;
 } ngx_stream_ssl_preread_ctx_t;
 
 static void
@@ -109,7 +112,6 @@ ngx_ssl_ja3_fp(ngx_pool_t *pool, ngx_ssl_ja3_t *ja3, ngx_str_t *out)
         return 2;
     }
     out->data = cur;
-    out->len = size;
     u_char *last = cur + size;
 
     cur = ngx_slprintf(cur, last, "%d,", ja3->version);
@@ -235,7 +237,40 @@ ngx_module_t  ngx_stream_ssl_preread_module = {
 };
 
 static ngx_int_t
-ngx_stream_ssl_preread_ja3_hash_variable(ngx_stream_session_t *s,
+ngx_stream_ssl_preread_prologue_variable(ngx_stream_session_t *s,
+                                         ngx_stream_variable_value_t *v, uintptr_t data)
+{
+    ngx_stream_ssl_preread_ctx_t  *ctx;
+
+    if (s->connection == NULL) {
+        return NGX_OK;
+    }
+    v->data = ngx_pcalloc(s->connection->pool, PROLOGUE_SIZE * 2);
+    if (v->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
+    if (ctx == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+    if(ctx->prologue_sz <= 0) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+    ngx_hex_dump(v->data, ctx->prologue, ctx->prologue_sz);
+
+    v->len = ctx->prologue_sz * 2;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+static ngx_int_t
+ngx_stream_ssl_preread_ja3n_hash_variable(ngx_stream_session_t *s,
         ngx_stream_variable_value_t *v, uintptr_t data)
 {
     ngx_stream_ssl_preread_ctx_t  *ctx;
@@ -279,7 +314,7 @@ ngx_stream_ssl_preread_ja3_hash_variable(ngx_stream_session_t *s,
 }
 
 static ngx_int_t
-ngx_stream_ssl_preread_ja3_variable(ngx_stream_session_t *s,
+ngx_stream_ssl_preread_ja3n_variable(ngx_stream_session_t *s,
         ngx_stream_variable_value_t *v, uintptr_t data)
 {
     ngx_stream_ssl_preread_ctx_t  *ctx;
@@ -322,10 +357,13 @@ static ngx_stream_variable_t  ngx_stream_ssl_preread_vars[] = {
       ngx_stream_ssl_preread_alpn_protocols_variable, 0, 0, 0 },
 
     { ngx_string("ssl_preread_ja3n_hash"), NULL,
-      ngx_stream_ssl_preread_ja3_hash_variable, 0, 0, 0 },
+      ngx_stream_ssl_preread_ja3n_hash_variable, 0, 0, 0 },
 
     { ngx_string("ssl_preread_ja3n"), NULL,
-      ngx_stream_ssl_preread_ja3_variable, 0, 0, 0 },
+      ngx_stream_ssl_preread_ja3n_variable, 0, 0, 0 },
+
+    { ngx_string("ssl_preread_prologue"), NULL,
+      ngx_stream_ssl_preread_prologue_variable, 0, 0, 0 },
 
       ngx_stream_null_variable
 };
@@ -371,10 +409,16 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
         ctx->pool = c->pool;
         ctx->log = c->log;
         ctx->pos = c->buffer->pos;
+        ctx->prologue_sz = 0;
     }
 
     p = ctx->pos;
     last = c->buffer->last;
+    if(ctx->prologue_sz < PROLOGUE_SIZE) {
+        size_t sz = last > p ? ngx_min((size_t) (last - p), PROLOGUE_SIZE) : 0;
+        memcpy(ctx->prologue, p, sz);
+        ctx->prologue_sz = sz;
+    }
 
     while (last - p >= 5) {
 
@@ -417,7 +461,7 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
         }
 
         if (rc == NGX_OK) {
-            if(ctx->ja3.extensions) {
+            if(ctx->ja3.extensions && ctx->ja3.extensions_sz) {
                 ngx_sort_ext(ctx->ja3.extensions, ctx->ja3.extensions_sz);
             }
             return ngx_stream_ssl_preread_servername(s, &ctx->host);
@@ -495,6 +539,8 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         switch (state) {
 
         case sw_start:
+            ctx->ja3.extensions_sz = 0;
+            ctx->ja3.extensions = NULL;
             state = sw_header;
             dst = p;
             size = 4;
@@ -561,8 +607,6 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
             break;
 
         case sw_cm:
-            ctx->ja3.extensions_sz = 0;
-            ctx->ja3.extensions = NULL;
             if (left == 0) {
                 /* no extensions */
                 return NGX_OK;
