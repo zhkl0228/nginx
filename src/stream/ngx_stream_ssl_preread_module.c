@@ -48,6 +48,7 @@ typedef struct {
     ngx_ssl_ja3_t   ja3;
     u_char          prologue[PROLOGUE_SIZE];
     size_t          prologue_sz;
+    ngx_flag_t      is_ssl;
 } ngx_stream_ssl_preread_ctx_t;
 
 static void
@@ -106,10 +107,14 @@ ngx_ssl_ja3_fp(ngx_pool_t *pool, ngx_ssl_ja3_t *ja3, ngx_str_t *out)
         return 1;
     }
 
-    const size_t size = (ja3->ciphers_sz + ja3->extensions_sz + ja3->curves_sz + ja3->point_formats_sz + 1) * 6;
-    cur = ngx_pnalloc(pool, size);
-    if(size <= 0 || cur == NULL) {
+    const size_t total = ja3->ciphers_sz + ja3->extensions_sz + ja3->curves_sz + ja3->point_formats_sz;
+    if(total <= 0) {
         return 2;
+    }
+    const size_t size = (total + 1) * 6;
+    cur = ngx_pnalloc(pool, size);
+    if(cur == NULL) {
+        return 3;
     }
     out->data = cur;
     u_char *last = cur + size;
@@ -245,10 +250,6 @@ ngx_stream_ssl_preread_prologue_variable(ngx_stream_session_t *s,
     if (s->connection == NULL) {
         return NGX_OK;
     }
-    v->data = ngx_pcalloc(s->connection->pool, PROLOGUE_SIZE * 2);
-    if (v->data == NULL) {
-        return NGX_ERROR;
-    }
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
     if (ctx == NULL) {
@@ -258,6 +259,10 @@ ngx_stream_ssl_preread_prologue_variable(ngx_stream_session_t *s,
     if(ctx->prologue_sz <= 0) {
         v->not_found = 1;
         return NGX_OK;
+    }
+    v->data = ngx_pcalloc(s->connection->pool, PROLOGUE_SIZE * 2);
+    if (v->data == NULL) {
+        return NGX_ERROR;
     }
     ngx_hex_dump(v->data, ctx->prologue, ctx->prologue_sz);
 
@@ -283,14 +288,8 @@ ngx_stream_ssl_preread_ja3n_hash_variable(ngx_stream_session_t *s,
         return NGX_OK;
     }
 
-    v->data = ngx_pcalloc(s->connection->pool, 32);
-
-    if (v->data == NULL) {
-        return NGX_ERROR;
-    }
-
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
-    if (ctx == NULL) {
+    if (ctx == NULL || !ctx->is_ssl) {
         v->not_found = 1;
         return NGX_OK;
     }
@@ -299,6 +298,10 @@ ngx_stream_ssl_preread_ja3n_hash_variable(ngx_stream_session_t *s,
         return NGX_OK;
     }
 
+    v->data = ngx_pcalloc(s->connection->pool, 32);
+    if (v->data == NULL) {
+        return NGX_ERROR;
+    }
 
     ngx_md5_init(&md5_ctx);
     ngx_md5_update(&md5_ctx, fp.data, fp.len);
@@ -321,7 +324,7 @@ ngx_stream_ssl_preread_ja3n_variable(ngx_stream_session_t *s,
     ngx_str_t                      fp = ngx_null_string;
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
-    if (ctx == NULL) {
+    if (ctx == NULL || !ctx->is_ssl) {
         v->not_found = 1;
         return NGX_OK;
     }
@@ -409,7 +412,6 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
         ctx->pool = c->pool;
         ctx->log = c->log;
         ctx->pos = c->buffer->pos;
-        ctx->prologue_sz = 0;
     }
 
     p = ctx->pos;
@@ -427,20 +429,19 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
                            "ssl preread: version 2 ClientHello");
             ctx->version[0] = p[3];
             ctx->version[1] = p[4];
+            ctx->is_ssl = 1;
             return NGX_OK;
         }
 
         if (p[0] != 0x16) {
             ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
                            "ssl preread: not a handshake");
-            ngx_stream_set_ctx(s, NULL, ngx_stream_ssl_preread_module);
             return NGX_DECLINED;
         }
 
         if (p[1] != 3) {
             ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
                            "ssl preread: unsupported SSL version");
-            ngx_stream_set_ctx(s, NULL, ngx_stream_ssl_preread_module);
             return NGX_DECLINED;
         }
 
@@ -456,11 +457,11 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
         rc = ngx_stream_ssl_preread_parse_record(ctx, p, p + len);
 
         if (rc == NGX_DECLINED) {
-            ngx_stream_set_ctx(s, NULL, ngx_stream_ssl_preread_module);
             return NGX_DECLINED;
         }
 
         if (rc == NGX_OK) {
+            ctx->is_ssl = 1;
             if(ctx->ja3.extensions && ctx->ja3.extensions_sz) {
                 ngx_sort_ext(ctx->ja3.extensions, ctx->ja3.extensions_sz);
             }
@@ -877,7 +878,7 @@ ngx_stream_ssl_preread_protocol_variable(ngx_stream_session_t *s,
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
 
-    if (ctx == NULL) {
+    if (ctx == NULL || !ctx->is_ssl) {
         v->not_found = 1;
         return NGX_OK;
     }
@@ -932,7 +933,7 @@ ngx_stream_ssl_preread_server_name_variable(ngx_stream_session_t *s,
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
 
-    if (ctx == NULL) {
+    if (ctx == NULL || !ctx->is_ssl) {
         v->not_found = 1;
         return NGX_OK;
     }
@@ -955,7 +956,7 @@ ngx_stream_ssl_preread_alpn_protocols_variable(ngx_stream_session_t *s,
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
 
-    if (ctx == NULL) {
+    if (ctx == NULL || !ctx->is_ssl) {
         v->not_found = 1;
         return NGX_OK;
     }
