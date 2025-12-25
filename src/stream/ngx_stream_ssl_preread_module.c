@@ -55,6 +55,7 @@ typedef struct {
     u_char          session_id[32];
     size_t          session_id_len;
     ngx_str_t       raw;
+    u_char          public_key[32];
 } ngx_stream_ssl_preread_ctx_t;
 
 static void
@@ -518,6 +519,16 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
                                   "ssl preread: random=%*s, session_id=(empty)",
                                   64, random_hex);
                 }
+
+                {
+                    u_char  public_key_hex[64 + 1];
+                    ngx_hex_dump(public_key_hex, ctx->public_key, 32);
+                    public_key_hex[64] = '\0';
+
+                    ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                  "ssl preread: public_key=%*s",
+                                  64, public_key_hex);
+                }
             } else {
                 ngx_log_debug1(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
                               "ssl preread: ClientHello parsed successfully, raw.len=%uz",
@@ -568,7 +579,10 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         sw_alpn_proto_data, /* ALPN protocol_name */
         sw_supver_len,      /* supported_versions length */
         sw_supported_groups_len, /* supported_groups length */
-        sw_ec_point_formats_len  /* ec_point_formats length */
+        sw_ec_point_formats_len,  /* ec_point_formats length */
+        sw_key_share_len,   /* key_share length */
+        sw_key_share_entry,  /* key_share entry */
+        sw_key_share_skip   /* skip key_share key data */
     } state;
 
     ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
@@ -736,6 +750,14 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
                 break;
             }
 
+            if (p[0] == 0 && p[1] == 51) {
+                /* key_share extension (0x0033) */
+                state = sw_key_share_len;
+                dst = p;
+                size = 2;
+                break;
+            }
+
             state = sw_ext;
             dst = NULL;
             size = (p[2] << 8) + p[3];
@@ -755,6 +777,59 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
             ctx->ja3.point_formats = ngx_pnalloc(ctx->pool, size);
             dst = ctx->ja3.point_formats;
             state = sw_ext;
+            break;
+
+        case sw_key_share_len:
+            /* ext contains the extension data length, p contains key_share_len */
+            ext = (p[0] << 8) + p[1];  /* total key_share list length */
+            if (ext >= 4) {
+                state = sw_key_share_entry;
+                dst = ctx->buf;  /* read 4-byte header into buf */
+                size = 4;  /* group(2) + key_len(2) */
+            } else {
+                /* skip this extension */
+                state = sw_ext;
+                dst = NULL;
+                size = ext;
+            }
+            break;
+
+        case sw_key_share_entry:
+            {
+                u_short group = (ctx->buf[0] << 8) + ctx->buf[1];
+                u_short key_len = (ctx->buf[2] << 8) + ctx->buf[3];
+
+                ext -= 4;  /* consumed group(2) + key_len(2) */
+
+                if (group == 0x001d && key_len == 32 && ext >= key_len) {
+                    /* X25519 with 32-byte key */
+                    dst = ctx->public_key;
+                    size = key_len;
+                    ext -= key_len;
+                    state = sw_ext;
+                } else {
+                    /* skip this key_share entry */
+                    dst = NULL;
+                    size = key_len;
+                    ext -= key_len;
+                    state = sw_key_share_skip;
+                }
+            }
+            break;
+
+        case sw_key_share_skip:
+            /* Just skipped a key, check if there's another entry */
+            if (ext >= 4) {
+                /* Read next entry header */
+                state = sw_key_share_entry;
+                dst = ctx->buf;
+                size = 4;
+            } else {
+                /* no more complete entries */
+                state = sw_ext;
+                dst = NULL;
+                size = ext;
+            }
             break;
 
         case sw_sni_len:
