@@ -52,10 +52,9 @@ typedef struct {
     size_t          prologue_sz;
     ngx_flag_t      is_ssl;
     u_char          random[32];
-    u_char          session_id[32];
-    size_t          session_id_len;
+    ngx_str_t       session_id;
     ngx_str_t       raw;
-    u_char          public_key[32];
+    ngx_str_t       public_key;
 } ngx_stream_ssl_preread_ctx_t;
 
 static void
@@ -422,6 +421,8 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
         ctx->log = c->log;
         ctx->pos = c->buffer->pos;
         ngx_str_null(&ctx->raw);
+        ngx_str_null(&ctx->public_key);
+        ngx_str_null(&ctx->session_id);
     }
 
     p = ctx->pos;
@@ -506,28 +507,31 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
                 ngx_hex_dump(random_hex, ctx->random, 32);
                 random_hex[64] = '\0';
 
-                if (ctx->session_id_len > 0) {
-                    ngx_hex_dump(session_id_hex, ctx->session_id, ctx->session_id_len);
-                    session_id_hex[ctx->session_id_len * 2] = '\0';
+                if (ctx->session_id.data != NULL && ctx->session_id.len > 0) {
+                    ngx_hex_dump(session_id_hex, ctx->session_id.data, ctx->session_id.len);
+                    session_id_hex[ctx->session_id.len * 2] = '\0';
 
                     ngx_log_debug4(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
                                   "ssl preread: random=%*s, session_id=%*s",
                                   64, random_hex,
-                                  ctx->session_id_len * 2, session_id_hex);
+                                  ctx->session_id.len * 2, session_id_hex);
                 } else {
                     ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
                                   "ssl preread: random=%*s, session_id=(empty)",
                                   64, random_hex);
                 }
 
-                {
-                    u_char  public_key_hex[64 + 1];
-                    ngx_hex_dump(public_key_hex, ctx->public_key, 32);
-                    public_key_hex[64] = '\0';
+                if (ctx->public_key.data != NULL && ctx->public_key.len > 0) {
+                    u_char  *public_key_hex;
+                    public_key_hex = ngx_pnalloc(ctx->pool, ctx->public_key.len * 2 + 1);
+                    if (public_key_hex != NULL) {
+                        ngx_hex_dump(public_key_hex, ctx->public_key.data, ctx->public_key.len);
+                        public_key_hex[ctx->public_key.len * 2] = '\0';
 
-                    ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
-                                  "ssl preread: public_key=%*s",
-                                  64, public_key_hex);
+                        ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                      "ssl preread: public_key=%*s",
+                                      ctx->public_key.len * 2, public_key_hex);
+                    }
                 }
             } else {
                 ngx_log_debug1(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
@@ -648,9 +652,17 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
             break;
 
         case sw_sid_len:
-            ctx->session_id_len = p[0];
+            ctx->session_id.len = p[0];
             state = sw_sid;
-            dst = ctx->session_id;
+            if (ctx->session_id.len > 0) {
+                ctx->session_id.data = ngx_pnalloc(ctx->pool, ctx->session_id.len);
+                if (ctx->session_id.data == NULL) {
+                    return NGX_ERROR;
+                }
+                dst = ctx->session_id.data;
+            } else {
+                dst = NULL;
+            }
             size = p[0];
             break;
 
@@ -803,7 +815,12 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
 
                 if (group == 0x001d && key_len == 32 && ext >= key_len) {
                     /* X25519 with 32-byte key */
-                    dst = ctx->public_key;
+                    ctx->public_key.len = key_len;
+                    ctx->public_key.data = ngx_pnalloc(ctx->pool, key_len);
+                    if (ctx->public_key.data == NULL) {
+                        return NGX_ERROR;
+                    }
+                    dst = ctx->public_key.data;
                     size = key_len;
                     ext -= key_len;
                     state = sw_ext;
