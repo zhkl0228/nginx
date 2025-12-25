@@ -51,6 +51,10 @@ typedef struct {
     u_char          prologue[PROLOGUE_SIZE];
     size_t          prologue_sz;
     ngx_flag_t      is_ssl;
+    u_char          random[32];
+    u_char          session_id[32];
+    size_t          session_id_len;
+    ngx_str_t       raw;
 } ngx_stream_ssl_preread_ctx_t;
 
 static void
@@ -416,6 +420,7 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
         ctx->pool = c->pool;
         ctx->log = c->log;
         ctx->pos = c->buffer->pos;
+        ngx_str_null(&ctx->raw);
     }
 
     p = ctx->pos;
@@ -469,6 +474,56 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
             if(ctx->ja3.extensions && ctx->ja3.extensions_sz) {
                 ngx_sort_ext(ctx->ja3.extensions, ctx->ja3.extensions_sz);
             }
+
+            /* save raw ClientHello record (without 5-byte TLS header) */
+            ctx->raw.len = len;
+            ctx->raw.data = ngx_pnalloc(ctx->pool, ctx->raw.len);
+            if (ctx->raw.data != NULL) {
+                ngx_memcpy(ctx->raw.data, p, ctx->raw.len);
+            }
+
+            if (ctx->log->log_level >= NGX_LOG_DEBUG) {
+                u_char  *raw_hex;
+                u_char  random_hex[64 + 1];
+                u_char  session_id_hex[64 + 1];
+
+                if (ctx->raw.data != NULL && ctx->raw.len > 0) {
+                    raw_hex = ngx_pnalloc(ctx->pool, ctx->raw.len * 2 + 1);
+                    if (raw_hex != NULL) {
+                        ngx_hex_dump(raw_hex, ctx->raw.data, ctx->raw.len);
+                        raw_hex[ctx->raw.len * 2] = '\0';
+
+                        ngx_log_debug3(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                      "ssl preread: ClientHello parsed successfully, raw.len=%uz, raw=%*s",
+                                      ctx->raw.len, ctx->raw.len * 2, raw_hex);
+                    }
+                } else {
+                    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                  "ssl preread: ClientHello parsed successfully, raw=(null)");
+                }
+
+                ngx_hex_dump(random_hex, ctx->random, 32);
+                random_hex[64] = '\0';
+
+                if (ctx->session_id_len > 0) {
+                    ngx_hex_dump(session_id_hex, ctx->session_id, ctx->session_id_len);
+                    session_id_hex[ctx->session_id_len * 2] = '\0';
+
+                    ngx_log_debug4(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                  "ssl preread: random=%*s, session_id=%*s",
+                                  64, random_hex,
+                                  ctx->session_id_len * 2, session_id_hex);
+                } else {
+                    ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                  "ssl preread: random=%*s, session_id=(empty)",
+                                  64, random_hex);
+                }
+            } else {
+                ngx_log_debug1(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                              "ssl preread: ClientHello parsed successfully, raw.len=%uz",
+                              ctx->raw.len);
+            }
+
             return ngx_stream_ssl_preread_servername(s, &ctx->host);
         }
 
@@ -568,7 +623,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         case sw_version:
             ctx->ja3.version = (ctx->version[0] << 8) + ctx->version[1];
             state = sw_random;
-            dst = NULL;
+            dst = ctx->random;
             size = 32;
             break;
 
@@ -579,8 +634,9 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
             break;
 
         case sw_sid_len:
+            ctx->session_id_len = p[0];
             state = sw_sid;
-            dst = NULL;
+            dst = ctx->session_id;
             size = p[0];
             break;
 
