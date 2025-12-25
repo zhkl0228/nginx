@@ -1175,11 +1175,6 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
                 ctx->reality_decrypted = 1;
             }
         }
-
-        if (!ctx->reality_decrypted) {
-            v->not_found = 1;
-            return NGX_OK;
-        }
     }
 
     v->data = ngx_pnalloc(s->connection->pool, 16);
