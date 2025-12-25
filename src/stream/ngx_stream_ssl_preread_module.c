@@ -10,9 +10,11 @@
 #include <ngx_md5.h>
 
 #define PROLOGUE_SIZE 32
+#define REALITY_KEY_SIZE 32
 
 typedef struct {
     ngx_flag_t      enabled;
+    u_char          realityKey[REALITY_KEY_SIZE];
 } ngx_stream_ssl_preread_srv_conf_t;
 
 
@@ -199,13 +201,15 @@ static void *ngx_stream_ssl_preread_create_srv_conf(ngx_conf_t *cf);
 static char *ngx_stream_ssl_preread_merge_srv_conf(ngx_conf_t *cf, void *parent,
     void *child);
 static ngx_int_t ngx_stream_ssl_preread_init(ngx_conf_t *cf);
+static char *ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd,
+    void *conf);
 
 
 static ngx_command_t  ngx_stream_ssl_preread_commands[] = {
 
     { ngx_string("ssl_preread"),
-      NGX_STREAM_MAIN_CONF|NGX_STREAM_SRV_CONF|NGX_CONF_FLAG,
-      ngx_conf_set_flag_slot,
+      NGX_STREAM_MAIN_CONF|NGX_STREAM_SRV_CONF|NGX_CONF_1MORE,
+      ngx_stream_ssl_preread,
       NGX_STREAM_SRV_CONF_OFFSET,
       offsetof(ngx_stream_ssl_preread_srv_conf_t, enabled),
       NULL },
@@ -1001,6 +1005,7 @@ ngx_stream_ssl_preread_create_srv_conf(ngx_conf_t *cf)
     }
 
     conf->enabled = NGX_CONF_UNSET;
+    ngx_memzero(conf->realityKey, REALITY_KEY_SIZE);
 
     return conf;
 }
@@ -1013,6 +1018,91 @@ ngx_stream_ssl_preread_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_stream_ssl_preread_srv_conf_t *conf = child;
 
     ngx_conf_merge_value(conf->enabled, prev->enabled, 0);
+    ngx_memcpy(conf->realityKey, prev->realityKey, REALITY_KEY_SIZE);
+
+    return NGX_CONF_OK;
+}
+
+
+static char *
+ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+    ngx_stream_ssl_preread_srv_conf_t  *sscf = conf;
+    ngx_str_t                          *value;
+    ngx_uint_t                          i;
+
+    value = cf->args->elts;
+
+    for (i = 1; i < cf->args->nelts; i++) {
+        if (ngx_strcmp(value[i].data, "on") == 0) {
+            sscf->enabled = 1;
+            continue;
+        }
+
+        if (ngx_strcmp(value[i].data, "off") == 0) {
+            sscf->enabled = 0;
+            continue;
+        }
+
+        if (ngx_strncmp(value[i].data, "reality=", 8) == 0) {
+            u_char  *hex_str = value[i].data + 8;
+            size_t   hex_len = value[i].len - 8;
+            size_t   j;
+
+            if (hex_len != REALITY_KEY_SIZE * 2) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                  "reality parameter must be 64 hex characters (32 bytes)");
+                return NGX_CONF_ERROR;
+            }
+
+            for (j = 0; j < hex_len; j++) {
+                if (!((hex_str[j] >= '0' && hex_str[j] <= '9') ||
+                      (hex_str[j] >= 'a' && hex_str[j] <= 'f') ||
+                      (hex_str[j] >= 'A' && hex_str[j] <= 'F'))) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                      "reality parameter must contain only hex characters");
+                    return NGX_CONF_ERROR;
+                }
+            }
+
+            for (j = 0; j < REALITY_KEY_SIZE; j++) {
+                u_char high = hex_str[j * 2];
+                u_char low = hex_str[j * 2 + 1];
+
+                if (high >= '0' && high <= '9') high = high - '0';
+                else if (high >= 'a' && high <= 'f') high = high - 'a' + 10;
+                else if (high >= 'A' && high <= 'F') high = high - 'A' + 10;
+
+                if (low >= '0' && low <= '9') low = low - '0';
+                else if (low >= 'a' && low <= 'f') low = low - 'a' + 10;
+                else if (low >= 'A' && low <= 'F') low = low - 'A' + 10;
+
+                sscf->realityKey[j] = (high << 4) | low;
+            }
+            continue;
+        }
+
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                          "invalid parameter \"%V\"", &value[i]);
+        return NGX_CONF_ERROR;
+    }
+
+    if (sscf->enabled == NGX_CONF_UNSET) {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                          "\"ssl_preread\" must have \"on\" or \"off\" parameter");
+        return NGX_CONF_ERROR;
+    }
+
+    if (cf->log->log_level >= NGX_LOG_DEBUG) {
+        u_char  hex_buf[REALITY_KEY_SIZE * 2 + 1];
+
+        ngx_hex_dump(hex_buf, sscf->realityKey, REALITY_KEY_SIZE);
+        hex_buf[REALITY_KEY_SIZE * 2] = '\0';
+
+        ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
+                          "ssl_preread: enabled=%d, realityKey=%*s",
+                          sscf->enabled, REALITY_KEY_SIZE * 2, hex_buf);
+    }
 
     return NGX_CONF_OK;
 }
