@@ -9,7 +9,11 @@
 #include <ngx_stream.h>
 #include <ngx_md5.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
+
+#if OPENSSL_VERSION_NUMBER >= 0x10100000L
 #include <openssl/kdf.h>
+#endif
 
 #define REALITY_KEY_SIZE 32
 #define REALITY_SHORT_ID_SIZE 8
@@ -1368,6 +1372,13 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
     u_char *reality_key, u_char *short_id, u_char *version,
     uint32_t *timestamp, ngx_log_t *log)
 {
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+    /* X25519 requires OpenSSL 1.1.0+ */
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+        "reality: X25519 not supported in OpenSSL < 1.1.0");
+    ngx_memzero(short_id, REALITY_SHORT_ID_SIZE);
+    return NGX_OK;
+#else
     EVP_PKEY           *pkey = NULL, *peer_key = NULL;
     EVP_PKEY_CTX       *pctx = NULL, *kctx = NULL;
     EVP_CIPHER_CTX     *cipher_ctx = NULL;
@@ -1622,4 +1633,5 @@ cleanup:
     ngx_memzero(plaintext, sizeof(plaintext));
 
     return rc;
+#endif  /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
 }
