@@ -8,13 +8,21 @@
 #include <ngx_core.h>
 #include <ngx_stream.h>
 #include <ngx_md5.h>
+#include <openssl/evp.h>
+#include <openssl/kdf.h>
+
+#define REALITY_KEY_SIZE 32
+#define REALITY_SHORT_ID_SIZE 8
+#define REALITY_AUTH_KEY_SIZE 32
+#define REALITY_SESSION_ID_SIZE 32
+#define REALITY_RANDOM_SIZE 32
 
 #define PROLOGUE_SIZE 32
 #define REALITY_KEY_SIZE 32
 
 typedef struct {
     ngx_flag_t      enabled;
-    u_char          realityKey[REALITY_KEY_SIZE];
+    ngx_str_t       realityKey;
 } ngx_stream_ssl_preread_srv_conf_t;
 
 
@@ -55,6 +63,8 @@ typedef struct {
     ngx_str_t       session_id;
     ngx_str_t       raw;
     ngx_str_t       public_key;
+    u_char          reality_short_id[8];
+    ngx_flag_t      reality_decrypted;
 } ngx_stream_ssl_preread_ctx_t;
 
 static void
@@ -188,6 +198,10 @@ ngx_ssl_ja3_fp(ngx_pool_t *pool, ngx_ssl_ja3_t *ja3, ngx_str_t *out)
     return 0;
 }
 
+static ngx_int_t
+ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
+    u_char *reality_key, u_char *short_id, u_char *version,
+    uint32_t *timestamp, ngx_log_t *log);
 
 static ngx_int_t ngx_stream_ssl_preread_handler(ngx_stream_session_t *s);
 static ngx_int_t ngx_stream_ssl_preread_parse_record(
@@ -199,6 +213,8 @@ static ngx_int_t ngx_stream_ssl_preread_protocol_variable(
 static ngx_int_t ngx_stream_ssl_preread_server_name_variable(
     ngx_stream_session_t *s, ngx_stream_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_stream_ssl_preread_alpn_protocols_variable(
+    ngx_stream_session_t *s, ngx_stream_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_stream_ssl_preread_reality_short_id_variable(
     ngx_stream_session_t *s, ngx_stream_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_stream_ssl_preread_add_variables(ngx_conf_t *cf);
 static void *ngx_stream_ssl_preread_create_srv_conf(ngx_conf_t *cf);
@@ -376,6 +392,10 @@ static ngx_stream_variable_t  ngx_stream_ssl_preread_vars[] = {
     { ngx_string("ssl_preread_prologue"), NULL,
       ngx_stream_ssl_preread_prologue_variable, 0, 0, 0 },
 
+    /* REALITY short_id (hex encoded, 16 chars) */
+    { ngx_string("ssl_preread_reality_short_id"), NULL,
+      ngx_stream_ssl_preread_reality_short_id_variable, 0, 0, 0 },
+
       ngx_stream_null_variable
 };
 
@@ -423,6 +443,8 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
         ngx_str_null(&ctx->raw);
         ngx_str_null(&ctx->public_key);
         ngx_str_null(&ctx->session_id);
+        ngx_memzero(ctx->reality_short_id, 8);
+        ctx->reality_decrypted = 0;
     }
 
     p = ctx->pos;
@@ -1124,6 +1146,54 @@ ngx_stream_ssl_preread_alpn_protocols_variable(ngx_stream_session_t *s,
 
 
 static ngx_int_t
+ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
+    ngx_stream_variable_value_t *v, uintptr_t data)
+{
+    ngx_stream_ssl_preread_ctx_t       *ctx;
+    ngx_stream_ssl_preread_srv_conf_t  *sscf;
+
+    ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
+
+    if (ctx == NULL || !ctx->is_ssl) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    /* Decrypt on first access */
+    if (!ctx->reality_decrypted) {
+        sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_ssl_preread_module);
+
+        if (sscf->realityKey.data != NULL && sscf->realityKey.len == REALITY_KEY_SIZE) {
+            if (ngx_stream_reality_decrypt_short_id(ctx, sscf->realityKey.data,
+                                                    ctx->reality_short_id,
+                                                    NULL, NULL,
+                                                    s->connection->log) == NGX_OK) {
+                ctx->reality_decrypted = 1;
+            }
+        }
+
+        if (!ctx->reality_decrypted) {
+            v->not_found = 1;
+            return NGX_OK;
+        }
+    }
+
+    v->data = ngx_pnalloc(s->connection->pool, 16);
+    if (v->data == NULL) {
+        return NGX_ERROR;
+    }
+
+    ngx_hex_dump(v->data, ctx->reality_short_id, 8);
+    v->len = 16;
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
 ngx_stream_ssl_preread_add_variables(ngx_conf_t *cf)
 {
     ngx_stream_variable_t  *var, *v;
@@ -1153,7 +1223,7 @@ ngx_stream_ssl_preread_create_srv_conf(ngx_conf_t *cf)
     }
 
     conf->enabled = NGX_CONF_UNSET;
-    ngx_memzero(conf->realityKey, REALITY_KEY_SIZE);
+    ngx_str_null(&conf->realityKey);
 
     return conf;
 }
@@ -1166,7 +1236,7 @@ ngx_stream_ssl_preread_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_stream_ssl_preread_srv_conf_t *conf = child;
 
     ngx_conf_merge_value(conf->enabled, prev->enabled, 0);
-    ngx_memcpy(conf->realityKey, prev->realityKey, REALITY_KEY_SIZE);
+    ngx_conf_merge_str_value(conf->realityKey, prev->realityKey, "");
 
     return NGX_CONF_OK;
 }
@@ -1193,40 +1263,37 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
 
         if (ngx_strncmp(value[i].data, "reality=", 8) == 0) {
-            u_char  *hex_str = value[i].data + 8;
-            size_t   hex_len = value[i].len - 8;
-            size_t   j;
+            ngx_str_t  base64_str, decoded;
+            ngx_int_t  rc;
 
-            if (hex_len != REALITY_KEY_SIZE * 2) {
-                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                  "reality parameter must be 64 hex characters (32 bytes)");
+            base64_str.data = value[i].data + 8;
+            base64_str.len = value[i].len - 8;
+
+            /* Allocate buffer for decoded data */
+            decoded.len = ngx_base64_decoded_length(base64_str.len);
+            decoded.data = ngx_pnalloc(cf->pool, decoded.len);
+            if (decoded.data == NULL) {
                 return NGX_CONF_ERROR;
             }
 
-            for (j = 0; j < hex_len; j++) {
-                if (!((hex_str[j] >= '0' && hex_str[j] <= '9') ||
-                      (hex_str[j] >= 'a' && hex_str[j] <= 'f') ||
-                      (hex_str[j] >= 'A' && hex_str[j] <= 'F'))) {
-                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                      "reality parameter must contain only hex characters");
-                    return NGX_CONF_ERROR;
-                }
+            /* Decode base64url */
+            rc = ngx_decode_base64url(&decoded, &base64_str);
+            if (rc != NGX_OK) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                  "invalid base64url encoding in reality parameter");
+                return NGX_CONF_ERROR;
             }
 
-            for (j = 0; j < REALITY_KEY_SIZE; j++) {
-                u_char high = hex_str[j * 2];
-                u_char low = hex_str[j * 2 + 1];
-
-                if (high >= '0' && high <= '9') high = high - '0';
-                else if (high >= 'a' && high <= 'f') high = high - 'a' + 10;
-                else if (high >= 'A' && high <= 'F') high = high - 'A' + 10;
-
-                if (low >= '0' && low <= '9') low = low - '0';
-                else if (low >= 'a' && low <= 'f') low = low - 'a' + 10;
-                else if (low >= 'A' && low <= 'F') low = low - 'A' + 10;
-
-                sscf->realityKey[j] = (high << 4) | low;
+            /* Verify decoded length */
+            if (decoded.len != REALITY_KEY_SIZE) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                  "reality key must be %uz bytes after base64url decoding (got %uz)",
+                                  REALITY_KEY_SIZE, decoded.len);
+                return NGX_CONF_ERROR;
             }
+
+            /* Store the decoded key */
+            sscf->realityKey = decoded;
             continue;
         }
 
@@ -1242,14 +1309,21 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     if (cf->log->log_level >= NGX_LOG_DEBUG) {
-        u_char  hex_buf[REALITY_KEY_SIZE * 2 + 1];
+        if (sscf->realityKey.data != NULL && sscf->realityKey.len > 0) {
+            u_char  *hex_buf = ngx_pnalloc(cf->pool, sscf->realityKey.len * 2 + 1);
+            if (hex_buf != NULL) {
+                ngx_hex_dump(hex_buf, sscf->realityKey.data, sscf->realityKey.len);
+                hex_buf[sscf->realityKey.len * 2] = '\0';
 
-        ngx_hex_dump(hex_buf, sscf->realityKey, REALITY_KEY_SIZE);
-        hex_buf[REALITY_KEY_SIZE * 2] = '\0';
-
-        ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
-                          "ssl_preread: enabled=%d, realityKey=%*s",
-                          sscf->enabled, REALITY_KEY_SIZE * 2, hex_buf);
+                ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
+                                  "ssl_preread: enabled=%d, realityKey=%*s",
+                                  sscf->enabled, sscf->realityKey.len * 2, hex_buf);
+            }
+        } else {
+            ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
+                              "ssl_preread: enabled=%d, realityKey=(empty)",
+                              sscf->enabled);
+        }
     }
 
     return NGX_CONF_OK;
@@ -1272,4 +1346,280 @@ ngx_stream_ssl_preread_init(ngx_conf_t *cf)
     *h = ngx_stream_ssl_preread_handler;
 
     return NGX_OK;
+}
+
+/*
+ * 解密 REALITY 协议的 Short ID
+ *
+ * 参数:
+ *   ctx: SSL preread 上下文（包含 random、session_id、raw、public_key）
+ *   reality_key: 服务器私钥（32字节）
+ *   short_id: 输出解密的 Short ID（8字节）
+ *   version: 输出版本号数组（3字节：major.minor.patch），可选，传 NULL 跳过
+ *   timestamp: 输出时间戳（Unix timestamp），可选，传 NULL 跳过
+ *   log: nginx 日志对象
+ *
+ * 返回:
+ *   NGX_OK: 解密成功
+ *   NGX_ERROR: 解密失败
+ */
+static ngx_int_t
+ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
+    u_char *reality_key, u_char *short_id, u_char *version,
+    uint32_t *timestamp, ngx_log_t *log)
+{
+    EVP_PKEY           *pkey = NULL, *peer_key = NULL;
+    EVP_PKEY_CTX       *pctx = NULL, *kctx = NULL;
+    EVP_CIPHER_CTX     *cipher_ctx = NULL;
+    u_char              shared_secret[32];
+    u_char              auth_key[REALITY_AUTH_KEY_SIZE];
+    u_char              plaintext[16];
+    size_t              shared_len, auth_key_len;
+    int                 len, tmplen;
+    ngx_int_t           rc = NGX_ERROR;
+    const char         *info = "REALITY";
+
+    /* 检查输入参数 */
+    if (ctx->session_id.len != REALITY_SESSION_ID_SIZE) {
+        ngx_log_debug2(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: invalid session_id length: %uz, expected %d",
+            ctx->session_id.len, REALITY_SESSION_ID_SIZE);
+        return NGX_ERROR;
+    }
+
+    if (ctx->public_key.len != REALITY_KEY_SIZE) {
+        ngx_log_debug2(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: invalid public_key length: %uz, expected %d",
+            ctx->public_key.len, REALITY_KEY_SIZE);
+        return NGX_ERROR;
+    }
+
+    /* 1. X25519 ECDH 密钥交换 */
+    pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL,
+        reality_key, REALITY_KEY_SIZE);
+    if (pkey == NULL) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_PKEY_new_raw_private_key() failed");
+        goto cleanup;
+    }
+
+    peer_key = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, NULL,
+        ctx->public_key.data, ctx->public_key.len);
+    if (peer_key == NULL) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_PKEY_new_raw_public_key() failed");
+        goto cleanup;
+    }
+
+    pctx = EVP_PKEY_CTX_new(pkey, NULL);
+    if (pctx == NULL) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_PKEY_CTX_new() failed");
+        goto cleanup;
+    }
+
+    if (EVP_PKEY_derive_init(pctx) != 1) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_PKEY_derive_init() failed");
+        goto cleanup;
+    }
+
+    if (EVP_PKEY_derive_set_peer(pctx, peer_key) != 1) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_PKEY_derive_set_peer() failed");
+        goto cleanup;
+    }
+
+    shared_len = sizeof(shared_secret);
+    if (EVP_PKEY_derive(pctx, shared_secret, &shared_len) != 1) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_PKEY_derive() failed");
+        goto cleanup;
+    }
+
+    /* 2. HKDF-SHA256 密钥派生 */
+    kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+    if (kctx == NULL) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_PKEY_CTX_new_id(HKDF) failed");
+        goto cleanup;
+    }
+
+    if (EVP_PKEY_derive_init(kctx) != 1 ||
+        EVP_PKEY_CTX_set_hkdf_md(kctx, EVP_sha256()) != 1 ||
+        EVP_PKEY_CTX_set1_hkdf_key(kctx, shared_secret, shared_len) != 1 ||
+        EVP_PKEY_CTX_set1_hkdf_salt(kctx, ctx->random, 20) != 1 ||
+        EVP_PKEY_CTX_add1_hkdf_info(kctx, (u_char *)info, ngx_strlen(info)) != 1)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: HKDF setup failed");
+        goto cleanup;
+    }
+
+    auth_key_len = REALITY_AUTH_KEY_SIZE;
+    if (EVP_PKEY_derive(kctx, auth_key, &auth_key_len) != 1) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: HKDF derive failed");
+        goto cleanup;
+    }
+
+    /* 3. 准备 AAD (Additional Authenticated Data) */
+    /* 直接使用 ctx->raw，清零 SessionId 位置 */
+    if (ctx->raw.len < 71) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: raw data too short");
+        goto cleanup;
+    }
+
+    /* 清零 SessionId 位置（offset 39，长度 32），用于 GCM AAD */
+    ngx_memzero(ctx->raw.data + 39, 32);
+
+    /* 4. AES-256-GCM 解密 */
+    cipher_ctx = EVP_CIPHER_CTX_new();
+    if (cipher_ctx == NULL) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_CIPHER_CTX_new() failed");
+        goto cleanup;
+    }
+
+    if (EVP_DecryptInit_ex(cipher_ctx, EVP_aes_256_gcm(), NULL,
+            NULL, NULL) != 1)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_DecryptInit_ex() failed");
+        goto cleanup;
+    }
+
+    if (EVP_DecryptInit_ex(cipher_ctx, NULL, NULL, auth_key,
+            ctx->random + 20) != 1)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_DecryptInit_ex(key, nonce) failed");
+        goto cleanup;
+    }
+
+    if (EVP_DecryptUpdate(cipher_ctx, NULL, &len,
+            ctx->raw.data, ctx->raw.len) != 1)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_DecryptUpdate(AAD) failed");
+        goto cleanup;
+    }
+
+    if (EVP_DecryptUpdate(cipher_ctx, plaintext, &len,
+            ctx->session_id.data, 16) != 1)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_DecryptUpdate(ciphertext) failed");
+        goto cleanup;
+    }
+
+    if (EVP_CIPHER_CTX_ctrl(cipher_ctx, EVP_CTRL_GCM_SET_TAG, 16,
+            ctx->session_id.data + 16) != 1)
+    {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: EVP_CIPHER_CTX_ctrl(SET_TAG) failed");
+        goto cleanup;
+    }
+
+    if (EVP_DecryptFinal_ex(cipher_ctx, plaintext + len, &tmplen) <= 0) {
+        if (log->log_level >= NGX_LOG_DEBUG) {
+            u_char  *random_hex, *session_id_hex, *raw_hex, *public_key_hex;
+
+            ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+                "reality: GCM authentication failed - invalid key or tampered data");
+
+            random_hex = ngx_pnalloc(ctx->pool, 64 + 1);
+            if (random_hex != NULL) {
+                ngx_hex_dump(random_hex, ctx->random, 32);
+                random_hex[64] = '\0';
+                ngx_log_debug2(NGX_LOG_DEBUG_STREAM, log, 0,
+                              "reality: random=%*s", 64, random_hex);
+            }
+
+            if (ctx->session_id.data != NULL && ctx->session_id.len > 0) {
+                session_id_hex = ngx_pnalloc(ctx->pool, ctx->session_id.len * 2 + 1);
+                if (session_id_hex != NULL) {
+                    ngx_hex_dump(session_id_hex, ctx->session_id.data, ctx->session_id.len);
+                    session_id_hex[ctx->session_id.len * 2] = '\0';
+                    ngx_log_debug2(NGX_LOG_DEBUG_STREAM, log, 0,
+                                  "reality: session_id=%*s",
+                                  ctx->session_id.len * 2, session_id_hex);
+                }
+            }
+
+            if (ctx->raw.data != NULL && ctx->raw.len > 0) {
+                raw_hex = ngx_pnalloc(ctx->pool, ctx->raw.len * 2 + 1);
+                if (raw_hex != NULL) {
+                    ngx_hex_dump(raw_hex, ctx->raw.data, ctx->raw.len);
+                    raw_hex[ctx->raw.len * 2] = '\0';
+                    ngx_log_debug3(NGX_LOG_DEBUG_STREAM, log, 0,
+                                  "reality: raw.len=%uz, raw=%*s",
+                                  ctx->raw.len, ctx->raw.len * 2, raw_hex);
+                }
+            }
+
+            if (ctx->public_key.data != NULL && ctx->public_key.len > 0) {
+                public_key_hex = ngx_pnalloc(ctx->pool, ctx->public_key.len * 2 + 1);
+                if (public_key_hex != NULL) {
+                    ngx_hex_dump(public_key_hex, ctx->public_key.data, ctx->public_key.len);
+                    public_key_hex[ctx->public_key.len * 2] = '\0';
+                    ngx_log_debug2(NGX_LOG_DEBUG_STREAM, log, 0,
+                                  "reality: public_key=%*s",
+                                  ctx->public_key.len * 2, public_key_hex);
+                }
+            }
+        } else {
+            ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+                "reality: GCM authentication failed - invalid key or tampered data");
+        }
+        goto cleanup;
+    }
+
+    /* 5. 提取数据 */
+
+    /* Short ID（明文的 [8:16] 字节） */
+    ngx_memcpy(short_id, plaintext + 8, REALITY_SHORT_ID_SIZE);
+
+    /* 可选：提取版本号（明文的 [0:3] 字节） */
+    if (version != NULL) {
+        version[0] = plaintext[0];  /* major */
+        version[1] = plaintext[1];  /* minor */
+        version[2] = plaintext[2];  /* patch */
+    }
+
+    /* 可选：提取时间戳（明文的 [4:8] 字节，Big Endian） */
+    if (timestamp != NULL) {
+        *timestamp = (plaintext[4] << 24) | (plaintext[5] << 16) |
+                     (plaintext[6] << 8) | plaintext[7];
+    }
+
+    ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+        "reality: decryption successful");
+
+    rc = NGX_OK;
+
+cleanup:
+    if (cipher_ctx != NULL) {
+        EVP_CIPHER_CTX_free(cipher_ctx);
+    }
+    if (kctx != NULL) {
+        EVP_PKEY_CTX_free(kctx);
+    }
+    if (pctx != NULL) {
+        EVP_PKEY_CTX_free(pctx);
+    }
+    if (peer_key != NULL) {
+        EVP_PKEY_free(peer_key);
+    }
+    if (pkey != NULL) {
+        EVP_PKEY_free(pkey);
+    }
+
+    /* 清理敏感数据 */
+    ngx_memzero(shared_secret, sizeof(shared_secret));
+    ngx_memzero(auth_key, sizeof(auth_key));
+    ngx_memzero(plaintext, sizeof(plaintext));
+
+    return rc;
 }
