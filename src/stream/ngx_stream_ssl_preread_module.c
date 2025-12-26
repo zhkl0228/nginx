@@ -1158,13 +1158,13 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
 
-    if (ctx == NULL || !ctx->is_ssl) {
+    if (ctx == NULL) {
         v->not_found = 1;
         return NGX_OK;
     }
 
     /* Decrypt on first access */
-    if (!ctx->reality_decrypted) {
+    if (!ctx->reality_decrypted && ctx->is_ssl) {
         sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_ssl_preread_module);
 
         if (sscf->realityKey.data != NULL && sscf->realityKey.len == REALITY_KEY_SIZE) {
@@ -1174,11 +1174,6 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
                                                     s->connection->log) == NGX_OK) {
                 ctx->reality_decrypted = 1;
             }
-        }
-
-        if (!ctx->reality_decrypted) {
-            v->not_found = 1;
-            return NGX_OK;
         }
     }
 
