@@ -1175,6 +1175,11 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
                 ctx->reality_decrypted = 1;
             }
         }
+
+        if (!ctx->reality_decrypted) {
+            v->not_found = 1;
+            return NGX_OK;
+        }
     }
 
     v->data = ngx_pnalloc(s->connection->pool, 16);
@@ -1348,19 +1353,19 @@ ngx_stream_ssl_preread_init(ngx_conf_t *cf)
 }
 
 /*
- * 解密 REALITY 协议的 Short ID
+ * Decrypt REALITY protocol Short ID
  *
- * 参数:
- *   ctx: SSL preread 上下文（包含 random、session_id、raw、public_key）
- *   reality_key: 服务器私钥（32字节）
- *   short_id: 输出解密的 Short ID（8字节）
- *   version: 输出版本号数组（3字节：major.minor.patch），可选，传 NULL 跳过
- *   timestamp: 输出时间戳（Unix timestamp），可选，传 NULL 跳过
- *   log: nginx 日志对象
+ * Parameters:
+ *   ctx: SSL preread context (contains random, session_id, raw, public_key)
+ *   reality_key: Server private key (32 bytes)
+ *   short_id: Output decrypted Short ID (8 bytes)
+ *   version: Output version array (3 bytes: major.minor.patch), optional, pass NULL to skip
+ *   timestamp: Output timestamp (Unix timestamp), optional, pass NULL to skip
+ *   log: nginx log object
  *
- * 返回:
- *   NGX_OK: 解密成功
- *   NGX_ERROR: 解密失败
+ * Returns:
+ *   NGX_OK: Decryption successful
+ *   NGX_ERROR: Decryption failed
  */
 static ngx_int_t
 ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
@@ -1385,7 +1390,7 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
     ngx_int_t           rc = NGX_ERROR;
     const char         *info = "REALITY";
 
-    /* 检查输入参数 */
+    /* Validate input parameters */
     if (ctx->session_id.len != REALITY_SESSION_ID_SIZE) {
         ngx_log_debug2(NGX_LOG_DEBUG_STREAM, log, 0,
             "reality: invalid session_id length: %uz, expected %d",
@@ -1400,7 +1405,7 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
         return NGX_ERROR;
     }
 
-    /* 1. X25519 ECDH 密钥交换 */
+    /* 1. X25519 ECDH key exchange */
     pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, NULL,
         reality_key, REALITY_KEY_SIZE);
     if (pkey == NULL) {
@@ -1443,7 +1448,7 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
         goto cleanup;
     }
 
-    /* 2. HKDF-SHA256 密钥派生 */
+    /* 2. HKDF-SHA256 key derivation */
     kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
     if (kctx == NULL) {
         ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
@@ -1469,18 +1474,18 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
         goto cleanup;
     }
 
-    /* 3. 准备 AAD (Additional Authenticated Data) */
-    /* 直接使用 ctx->raw，清零 SessionId 位置 */
+    /* 3. Prepare AAD (Additional Authenticated Data) */
+    /* Use ctx->raw directly, zero out SessionId position */
     if (ctx->raw.len < 71) {
         ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
             "reality: raw data too short");
         goto cleanup;
     }
 
-    /* 清零 SessionId 位置（offset 39，长度 32），用于 GCM AAD */
+    /* Zero out SessionId position (offset 39, length 32) for GCM AAD */
     ngx_memzero(ctx->raw.data + 39, 32);
 
-    /* 4. AES-256-GCM 解密 */
+    /* 4. AES-256-GCM decryption */
     cipher_ctx = EVP_CIPHER_CTX_new();
     if (cipher_ctx == NULL) {
         ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
@@ -1582,19 +1587,19 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
         goto cleanup;
     }
 
-    /* 5. 提取数据 */
+    /* 5. Extract data */
 
-    /* Short ID（明文的 [8:16] 字节） */
+    /* Short ID (plaintext bytes [8:16]) */
     ngx_memcpy(short_id, plaintext + 8, REALITY_SHORT_ID_SIZE);
 
-    /* 可选：提取版本号（明文的 [0:3] 字节） */
+    /* Optional: extract version (plaintext bytes [0:3]) */
     if (version != NULL) {
         version[0] = plaintext[0];  /* major */
         version[1] = plaintext[1];  /* minor */
         version[2] = plaintext[2];  /* patch */
     }
 
-    /* 可选：提取时间戳（明文的 [4:8] 字节，Big Endian） */
+    /* Optional: extract timestamp (plaintext bytes [4:8], Big Endian) */
     if (timestamp != NULL) {
         *timestamp = (plaintext[4] << 24) | (plaintext[5] << 16) |
                      (plaintext[6] << 8) | plaintext[7];
@@ -1622,7 +1627,7 @@ cleanup:
         EVP_PKEY_free(pkey);
     }
 
-    /* 清理敏感数据 */
+    /* Clean up sensitive data */
     ngx_memzero(shared_secret, sizeof(shared_secret));
     ngx_memzero(auth_key, sizeof(auth_key));
     ngx_memzero(plaintext, sizeof(plaintext));
