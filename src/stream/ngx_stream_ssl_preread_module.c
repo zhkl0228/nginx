@@ -62,133 +62,120 @@ typedef struct {
     u_char          prologue[PROLOGUE_SIZE];
     size_t          prologue_sz;
     ngx_flag_t      is_ssl;
-    u_char          random[32];
+    u_char          random[REALITY_RANDOM_SIZE];
     ngx_str_t       session_id;
     ngx_str_t       raw;
     ngx_str_t       public_key;
-    u_char          reality_short_id[8];
+    u_char          reality_short_id[REALITY_SHORT_ID_SIZE];
     ngx_flag_t      reality_decrypted;
 } ngx_stream_ssl_preread_ctx_t;
+
+static ngx_int_t
+ngx_ssl_ext_cmp(const void *a, const void *b)
+{
+    u_short va = *(const u_short *) a;
+    u_short vb = *(const u_short *) b;
+
+    return (va > vb) - (va < vb);
+}
 
 static void
 ngx_sort_ext(u_short *ext, size_t size)
 {
-    size_t i, j;
-    for (i = 0; i < size - 1; i++) {
-        for (j = 0; j < size - i - 1; j++) {
-            if (ext[j] > ext[j + 1]) {
-                u_short tmp = ext[j];
-                ext[j] = ext[j + 1];
-                ext[j + 1] = tmp;
-            }
-        }
+    if (size <= 1) {
+        return;
     }
+
+    ngx_sort(ext, size, sizeof(u_short), ngx_ssl_ext_cmp);
 }
 
-static const u_short GREASE[] = {
-    0x0a0a,
-    0x1a1a,
-    0x2a2a,
-    0x3a3a,
-    0x4a4a,
-    0x5a5a,
-    0x6a6a,
-    0x7a7a,
-    0x8a8a,
-    0x9a9a,
-    0xaaaa,
-    0xbaba,
-    0xcaca,
-    0xdada,
-    0xeaea,
-    0xfafa,
-};
-
+/*
+ * GREASE (Generate Random Extensions And Sustain Extensibility) values
+ * follow the pattern 0xNaNa where N is 0-F (e.g., 0x0a0a, 0x1a1a, ..., 0xfafa)
+ * Use bit operations for O(1) lookup instead of array traversal
+ */
 static int
 ngx_ssl_ja3_is_ext_greased(u_short id)
 {
-    size_t i;
-    for (i = 0; i < (sizeof(GREASE) / sizeof(GREASE[0])); ++i) {
-        if (id == GREASE[i]) {
-            return 1;
-        }
-    }
-    return 0;
+    return ((id & 0x0f) == 0x0a) && ((id >> 8) == (id & 0xff));
 }
 
 static int
 ngx_ssl_ja3_fp(ngx_pool_t *pool, ngx_ssl_ja3_t *ja3, ngx_str_t *out)
 {
-    size_t                    i;
-    u_char                    *cur = NULL;
+    size_t   i, total, size, added;
+    u_char  *cur, *last;
+    u_short  val;
 
     if (pool == NULL || ja3 == NULL || out == NULL) {
         return 1;
     }
 
-    const size_t total = ja3->ciphers_sz + ja3->extensions_sz + ja3->curves_sz + ja3->point_formats_sz;
-    if(total <= 0) {
+    total = ja3->ciphers_sz + ja3->extensions_sz + ja3->curves_sz + ja3->point_formats_sz;
+    if (total == 0) {
         return 2;
     }
-    const size_t size = (total + 1) * 6;
+
+    size = (total + 1) * 6;
     cur = ngx_pnalloc(pool, size);
-    if(cur == NULL) {
+    if (cur == NULL) {
         return 3;
     }
+
     out->data = cur;
-    u_char *last = cur + size;
+    last = cur + size;
 
     cur = ngx_slprintf(cur, last, "%d,", ja3->version);
 
     if (ja3->ciphers_sz && ja3->ciphers) {
-        size_t added = 0;
+        added = 0;
         for (i = 0; i < ja3->ciphers_sz; ++i) {
-            u_short cipher = ntohs(ja3->ciphers[i]);
-            if(ngx_ssl_ja3_is_ext_greased(cipher)) {
+            val = ntohs(ja3->ciphers[i]);
+            if (ngx_ssl_ja3_is_ext_greased(val)) {
                 continue;
             }
             if (added > 0) {
                 cur = ngx_slprintf(cur, last, "-");
             }
-            cur = ngx_slprintf(cur, last, "%d", cipher);
+            cur = ngx_slprintf(cur, last, "%d", val);
             added++;
         }
     }
     cur = ngx_slprintf(cur, last, ",");
 
     if (ja3->extensions_sz && ja3->extensions) {
-        size_t added = 0;
+        added = 0;
         for (i = 0; i < ja3->extensions_sz; i++) {
-            u_short extension = ja3->extensions[i];
-            if(ngx_ssl_ja3_is_ext_greased(extension)) {
+            val = ja3->extensions[i];
+            if (ngx_ssl_ja3_is_ext_greased(val)) {
                 continue;
             }
             if (added > 0) {
                 cur = ngx_slprintf(cur, last, "-");
             }
-            cur = ngx_slprintf(cur, last, "%d", extension);
+            cur = ngx_slprintf(cur, last, "%d", val);
             added++;
         }
     }
     cur = ngx_slprintf(cur, last, ",");
 
     if (ja3->curves_sz && ja3->curves) {
-        size_t added = 0;
+        added = 0;
         for (i = 0; i < ja3->curves_sz; i++) {
-            u_short curve = ntohs(ja3->curves[i]);
-            if(ngx_ssl_ja3_is_ext_greased(curve)) {
+            val = ntohs(ja3->curves[i]);
+            if (ngx_ssl_ja3_is_ext_greased(val)) {
                 continue;
             }
             if (added > 0) {
                 cur = ngx_slprintf(cur, last, "-");
             }
-            cur = ngx_slprintf(cur, last, "%d", curve);
+            cur = ngx_slprintf(cur, last, "%d", val);
             added++;
         }
     }
     cur = ngx_slprintf(cur, last, ",");
 
-    if(ja3->point_formats_sz && ja3->point_formats) {
+    if (ja3->point_formats_sz && ja3->point_formats) {
         for (i = 0; i < ja3->point_formats_sz; i++) {
             if (i > 0) {
                 cur = ngx_slprintf(cur, last, "-");
@@ -197,7 +184,7 @@ ngx_ssl_ja3_fp(ngx_pool_t *pool, ngx_ssl_ja3_t *ja3, ngx_str_t *out)
         }
     }
 
-    out->len = ((size_t) cur) - ((size_t) out->data);
+    out->len = cur - out->data;
     return 0;
 }
 
@@ -284,7 +271,7 @@ ngx_stream_ssl_preread_prologue_variable(ngx_stream_session_t *s,
         v->not_found = 1;
         return NGX_OK;
     }
-    if(ctx->prologue_sz <= 0) {
+    if (ctx->prologue_sz <= 0) {
         v->not_found = 1;
         return NGX_OK;
     }
@@ -321,7 +308,7 @@ ngx_stream_ssl_preread_ja3n_hash_variable(ngx_stream_session_t *s,
         v->not_found = 1;
         return NGX_OK;
     }
-    if(ngx_ssl_ja3_fp(s->connection->pool, &ctx->ja3, &fp)) {
+    if (ngx_ssl_ja3_fp(s->connection->pool, &ctx->ja3, &fp)) {
         v->not_found = 1;
         return NGX_OK;
     }
@@ -351,17 +338,17 @@ ngx_stream_ssl_preread_ja3n_variable(ngx_stream_session_t *s,
     ngx_stream_ssl_preread_ctx_t  *ctx;
     ngx_str_t                      fp = ngx_null_string;
 
+    if (s->connection == NULL) {
+        return NGX_OK;
+    }
+
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
     if (ctx == NULL || !ctx->is_ssl) {
         v->not_found = 1;
         return NGX_OK;
     }
 
-    if (s->connection == NULL) {
-        return NGX_OK;
-    }
-
-    if(ngx_ssl_ja3_fp(s->connection->pool, &ctx->ja3, &fp)) {
+    if (ngx_ssl_ja3_fp(s->connection->pool, &ctx->ja3, &fp)) {
         v->not_found = 1;
         return NGX_OK;
     }
@@ -447,15 +434,15 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
         ngx_str_null(&ctx->raw);
         ngx_str_null(&ctx->public_key);
         ngx_str_null(&ctx->session_id);
-        ngx_memzero(ctx->reality_short_id, 8);
+        ngx_memzero(ctx->reality_short_id, REALITY_SHORT_ID_SIZE);
         ctx->reality_decrypted = 0;
     }
 
     p = ctx->pos;
     last = c->buffer->last;
-    if(ctx->prologue_sz < PROLOGUE_SIZE) {
+    if (ctx->prologue_sz < PROLOGUE_SIZE) {
         size_t sz = last > p ? ngx_min((size_t) (last - p), PROLOGUE_SIZE) : 0;
-        memcpy(ctx->prologue, p, sz);
+        ngx_memcpy(ctx->prologue, p, sz);
         ctx->prologue_sz = sz;
     }
 
@@ -499,7 +486,7 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
 
         if (rc == NGX_OK) {
             ctx->is_ssl = 1;
-            if(ctx->ja3.extensions && ctx->ja3.extensions_sz) {
+            if (ctx->ja3.extensions && ctx->ja3.extensions_sz) {
                 ngx_sort_ext(ctx->ja3.extensions, ctx->ja3.extensions_sz);
             }
 
@@ -514,8 +501,8 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
 
             if (ctx->log->log_level >= NGX_LOG_DEBUG) {
                 u_char  *raw_hex;
-                u_char  random_hex[64 + 1];
-                u_char  session_id_hex[64 + 1];
+                u_char  random_hex[REALITY_RANDOM_SIZE * 2 + 1];
+                u_char  session_id_hex[REALITY_SESSION_ID_SIZE * 2 + 1];
 
                 if (ctx->raw.data != NULL && ctx->raw.len > 0) {
                     raw_hex = ngx_pnalloc(ctx->pool, ctx->raw.len * 2 + 1);
@@ -532,8 +519,8 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
                                   "ssl preread: ClientHello parsed successfully, raw=(null)");
                 }
 
-                ngx_hex_dump(random_hex, ctx->random, 32);
-                random_hex[64] = '\0';
+                ngx_hex_dump(random_hex, ctx->random, REALITY_RANDOM_SIZE);
+                random_hex[REALITY_RANDOM_SIZE * 2] = '\0';
 
                 if (ctx->session_id.data != NULL && ctx->session_id.len > 0) {
                     ngx_hex_dump(session_id_hex, ctx->session_id.data, ctx->session_id.len);
@@ -541,12 +528,12 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
 
                     ngx_log_debug4(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
                                   "ssl preread: random=%*s, session_id=%*s",
-                                  64, random_hex,
+                                  REALITY_RANDOM_SIZE * 2, random_hex,
                                   ctx->session_id.len * 2, session_id_hex);
                 } else {
                     ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
                                   "ssl preread: random=%*s, session_id=(empty)",
-                                  64, random_hex);
+                                  REALITY_RANDOM_SIZE * 2, random_hex);
                 }
 
                 if (ctx->public_key.data != NULL && ctx->public_key.len > 0) {
@@ -589,6 +576,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
 {
     size_t   left, n, size, ext;
     u_char  *dst, *p;
+    void    *ciphers;
 
     enum {
         sw_start = 0,
@@ -670,7 +658,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
             ctx->ja3.version = (ctx->version[0] << 8) + ctx->version[1];
             state = sw_random;
             dst = ctx->random;
-            size = 32;
+            size = REALITY_RANDOM_SIZE;
             break;
 
         case sw_random:
@@ -703,7 +691,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
         case sw_cs_len:
             state = sw_cs;
             size = (p[0] << 8) + p[1];
-            void *ciphers = ngx_pnalloc(ctx->pool, size);
+            ciphers = ngx_pnalloc(ctx->pool, size);
             dst = ciphers;
             ctx->ja3.ciphers_sz = size / 2;
             ctx->ja3.ciphers = ciphers;
@@ -737,7 +725,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
                 return NGX_OK;
             }
 
-            if(ctx->ja3.extensions_sz == 0 && ctx->ja3.extensions == NULL) {
+            if (ctx->ja3.extensions_sz == 0 && ctx->ja3.extensions == NULL) {
                 size_t ext_size = (p[0] << 8) + p[1];
                 ctx->ja3.extensions = ngx_pnalloc(ctx->pool, ext_size);
             }
@@ -747,7 +735,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
             break;
 
         case sw_ext_header:
-            if(ctx->ja3.extensions) {
+            if (ctx->ja3.extensions) {
                 ctx->ja3.extensions[ctx->ja3.extensions_sz++] = (p[0] << 8) + p[1];
             }
             if (p[0] == 0 && p[1] == 0 && ctx->host.data == NULL) {
@@ -841,7 +829,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
 
                 ext -= 4;  /* consumed group(2) + key_len(2) */
 
-                if (group == 0x001d && key_len == 32 && ext >= key_len) {
+                if (group == 0x001d && key_len == REALITY_KEY_SIZE && ext >= key_len) {
                     /* X25519 with 32-byte key */
                     ctx->public_key.len = key_len;
                     ctx->public_key.data = ngx_pnalloc(ctx->pool, key_len);
@@ -1188,13 +1176,13 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
         }
     }
 
-    v->data = ngx_pnalloc(s->connection->pool, 16);
+    v->data = ngx_pnalloc(s->connection->pool, REALITY_SHORT_ID_SIZE * 2);
     if (v->data == NULL) {
         return NGX_ERROR;
     }
 
-    ngx_hex_dump(v->data, ctx->reality_short_id, 8);
-    v->len = 16;
+    ngx_hex_dump(v->data, ctx->reality_short_id, REALITY_SHORT_ID_SIZE);
+    v->len = REALITY_SHORT_ID_SIZE * 2;
     v->valid = 1;
     v->no_cacheable = 1;
     v->not_found = 0;
@@ -1388,7 +1376,7 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
     EVP_PKEY           *pkey = NULL, *peer_key = NULL;
     EVP_PKEY_CTX       *pctx = NULL, *kctx = NULL;
     EVP_CIPHER_CTX     *cipher_ctx = NULL;
-    u_char              shared_secret[32];
+    u_char              shared_secret[REALITY_KEY_SIZE];
     u_char              auth_key[REALITY_AUTH_KEY_SIZE];
     u_char              plaintext[16];
     size_t              shared_len, auth_key_len;
@@ -1489,7 +1477,7 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
     }
 
     /* Zero out SessionId position (offset 39, length 32) for GCM AAD */
-    ngx_memzero(ctx->raw.data + 39, 32);
+    ngx_memzero(ctx->raw.data + 39, REALITY_SESSION_ID_SIZE);
 
     /* 4. AES-256-GCM decryption */
     cipher_ctx = EVP_CIPHER_CTX_new();
@@ -1546,12 +1534,12 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
             ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
                 "reality: GCM authentication failed - invalid key or tampered data");
 
-            random_hex = ngx_pnalloc(ctx->pool, 64 + 1);
+            random_hex = ngx_pnalloc(ctx->pool, REALITY_RANDOM_SIZE * 2 + 1);
             if (random_hex != NULL) {
-                ngx_hex_dump(random_hex, ctx->random, 32);
-                random_hex[64] = '\0';
+                ngx_hex_dump(random_hex, ctx->random, REALITY_RANDOM_SIZE);
+                random_hex[REALITY_RANDOM_SIZE * 2] = '\0';
                 ngx_log_debug2(NGX_LOG_DEBUG_STREAM, log, 0,
-                              "reality: random=%*s", 64, random_hex);
+                              "reality: random=%*s", REALITY_RANDOM_SIZE * 2, random_hex);
             }
 
             if (ctx->session_id.data != NULL && ctx->session_id.len > 0) {
