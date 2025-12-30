@@ -22,7 +22,6 @@
 #define REALITY_RANDOM_SIZE 32
 
 #define PROLOGUE_SIZE 32
-#define REALITY_KEY_SIZE 32
 
 typedef struct {
     ngx_flag_t      enabled;
@@ -207,8 +206,9 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
     u_char *reality_key, u_char *short_id, u_char *version,
     uint32_t *timestamp, ngx_log_t *log);
 
+static ngx_flag_t is_reality_key_valid(ngx_stream_ssl_preread_srv_conf_t *sscf);
 static ngx_int_t ngx_stream_ssl_preread_handler(ngx_stream_session_t *s);
-static ngx_int_t ngx_stream_ssl_preread_parse_record(
+static ngx_int_t ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf,
     ngx_stream_ssl_preread_ctx_t *ctx, u_char *pos, u_char *last);
 static ngx_int_t ngx_stream_ssl_preread_servername(ngx_stream_session_t *s,
     ngx_str_t *servername);
@@ -491,7 +491,7 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
 
         p += 5;
 
-        rc = ngx_stream_ssl_preread_parse_record(ctx, p, p + len);
+        rc = ngx_stream_ssl_preread_parse_record(sscf, ctx, p, p + len);
 
         if (rc == NGX_DECLINED) {
             return NGX_DECLINED;
@@ -503,11 +503,13 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
                 ngx_sort_ext(ctx->ja3.extensions, ctx->ja3.extensions_sz);
             }
 
-            /* save raw ClientHello record (without 5-byte TLS header) */
-            ctx->raw.len = len;
-            ctx->raw.data = ngx_pnalloc(ctx->pool, ctx->raw.len);
-            if (ctx->raw.data != NULL) {
-                ngx_memcpy(ctx->raw.data, p, ctx->raw.len);
+            if (is_reality_key_valid(sscf)) {
+                /* save raw ClientHello record (without 5-byte TLS header) */
+                ctx->raw.len = len;
+                ctx->raw.data = ngx_pnalloc(ctx->pool, ctx->raw.len);
+                if (ctx->raw.data != NULL) {
+                    ngx_memcpy(ctx->raw.data, p, ctx->raw.len);
+                }
             }
 
             if (ctx->log->log_level >= NGX_LOG_DEBUG) {
@@ -582,7 +584,7 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
 
 
 static ngx_int_t
-ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
+ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx_stream_ssl_preread_ctx_t *ctx,
     u_char *pos, u_char *last)
 {
     size_t   left, n, size, ext;
@@ -680,7 +682,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
         case sw_sid_len:
             ctx->session_id.len = p[0];
             state = sw_sid;
-            if (ctx->session_id.len > 0) {
+            if (ctx->session_id.len > 0 && is_reality_key_valid(sscf)) {
                 ctx->session_id.data = ngx_pnalloc(ctx->pool, ctx->session_id.len);
                 if (ctx->session_id.data == NULL) {
                     return NGX_ERROR;
@@ -788,7 +790,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_ctx_t *ctx,
                 break;
             }
 
-            if (p[0] == 0 && p[1] == 51) {
+            if (p[0] == 0 && p[1] == 51 && is_reality_key_valid(sscf)) {
                 /* key_share extension (0x0033) */
                 state = sw_key_share_len;
                 dst = p;
@@ -1148,6 +1150,15 @@ ngx_stream_ssl_preread_alpn_protocols_variable(ngx_stream_session_t *s,
     return NGX_OK;
 }
 
+static ngx_flag_t
+is_reality_key_valid(ngx_stream_ssl_preread_srv_conf_t *sscf)
+{
+    if (sscf->realityKey.data != NULL && sscf->realityKey.len == REALITY_KEY_SIZE) {
+        return 1;
+    } else {
+        return 0;
+    }
+}
 
 static ngx_int_t
 ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
@@ -1167,7 +1178,7 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
     if (!ctx->reality_decrypted && ctx->is_ssl) {
         sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_ssl_preread_module);
 
-        if (sscf->realityKey.data != NULL && sscf->realityKey.len == REALITY_KEY_SIZE) {
+        if (is_reality_key_valid(sscf)) {
             if (ngx_stream_reality_decrypt_short_id(ctx, sscf->realityKey.data,
                                                     ctx->reality_short_id,
                                                     NULL, NULL,
