@@ -694,6 +694,9 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
             state = sw_cs;
             size = (p[0] << 8) + p[1];
             ciphers = ngx_pnalloc(ctx->pool, size);
+            if (ciphers == NULL) {
+                return NGX_ERROR;
+            }
             dst = ciphers;
             ctx->ja3.ciphers_sz = size / 2;
             ctx->ja3.ciphers = ciphers;
@@ -733,6 +736,9 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
                    so capacity in u_short slots is ext_size/4 + 1 for safety */
                 ctx->ja3.extensions = ngx_pnalloc(ctx->pool,
                                                   (ext_size / 4 + 1) * sizeof(u_short));
+                if (ctx->ja3.extensions == NULL) {
+                    return NGX_ERROR;
+                }
             }
             state = sw_ext_header;
             dst = p;
@@ -800,6 +806,9 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
             size = (p[0] << 8) + p[1];
             ctx->ja3.curves_sz = size / 2;
             ctx->ja3.curves = ngx_pnalloc(ctx->pool, size);
+            if (ctx->ja3.curves == NULL) {
+                return NGX_ERROR;
+            }
             dst = (u_char *) ctx->ja3.curves;
             state = sw_ext;
             break;
@@ -808,6 +817,9 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
             size = p[0];
             ctx->ja3.point_formats_sz = size;
             ctx->ja3.point_formats = ngx_pnalloc(ctx->pool, size);
+            if (ctx->ja3.point_formats == NULL) {
+                return NGX_ERROR;
+            }
             dst = ctx->ja3.point_formats;
             state = sw_ext;
             break;
