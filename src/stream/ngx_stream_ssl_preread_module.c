@@ -863,7 +863,10 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
                     dst = ctx->public_key.data;
                     size = key_len;
                     ext -= key_len;
-                    state = sw_ext;
+                    /* Return to key_share iteration so remaining entries
+                       are skipped within the key_share extension boundary
+                       rather than misread as outer extension headers. */
+                    state = sw_key_share_skip;
                 } else {
                     /* skip this key_share entry */
                     if (ext < key_len) {
