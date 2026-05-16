@@ -8,11 +8,13 @@
 #include <ngx_core.h>
 #include <ngx_stream.h>
 #include <ngx_md5.h>
+
+#if (NGX_OPENSSL)
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
-
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
 #include <openssl/kdf.h>
+#endif
 #endif
 
 #define REALITY_KEY_SIZE 32
@@ -194,10 +196,12 @@ ngx_ssl_ja3_fp(ngx_pool_t *pool, ngx_ssl_ja3_t *ja3, ngx_str_t *out)
     return 0;
 }
 
+#if (NGX_OPENSSL)
 static ngx_int_t
 ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
     u_char *reality_key, u_char *short_id, u_char *version,
     uint32_t *timestamp, ngx_log_t *log);
+#endif
 
 static ngx_flag_t is_reality_key_valid(ngx_stream_ssl_preread_srv_conf_t *sscf);
 static ngx_int_t ngx_stream_ssl_preread_handler(ngx_stream_session_t *s);
@@ -1201,6 +1205,7 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
         return NGX_OK;
     }
 
+#if (NGX_OPENSSL)
     /* Decrypt on first access */
     if (ctx != NULL && !ctx->reality_decrypted && ctx->is_ssl) {
         if (ngx_stream_reality_decrypt_short_id(ctx, sscf->reality_key.data,
@@ -1210,6 +1215,7 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
             ctx->reality_decrypted = 1;
         }
     }
+#endif
 
     v->data = ngx_pnalloc(s->connection->pool, REALITY_SHORT_ID_SIZE * 2);
     if (v->data == NULL) {
@@ -1300,6 +1306,7 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         }
 
         if (ngx_strncmp(value[i].data, "reality=", 8) == 0) {
+#if (NGX_OPENSSL)
             ngx_str_t  base64_str, decoded;
             ngx_int_t  rc;
 
@@ -1332,6 +1339,14 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             /* Store the decoded key */
             sscf->reality_key = decoded;
             continue;
+#else
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                              "\"reality=\" parameter requires nginx to be "
+                              "built with OpenSSL support (e.g. configure "
+                              "with --with-http_ssl_module or "
+                              "--with-stream_ssl_module)");
+            return NGX_CONF_ERROR;
+#endif
         }
 
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
@@ -1377,6 +1392,7 @@ ngx_stream_ssl_preread_init(ngx_conf_t *cf)
     return NGX_OK;
 }
 
+#if (NGX_OPENSSL)
 /*
  * Decrypt REALITY protocol Short ID
  *
@@ -1686,3 +1702,4 @@ cleanup:
     return rc;
 #endif  /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
 }
+#endif  /* NGX_OPENSSL */
