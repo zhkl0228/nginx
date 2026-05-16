@@ -18,7 +18,115 @@ Enterprise distributions, commercial support and training are available from [F5
 > [!IMPORTANT]
 > The goal of this README is to provide a basic, structured introduction to NGINX for novice users. Please refer to the [full NGINX documentation](https://nginx.org/en/docs/) for detailed information on [installing](https://nginx.org/en/docs/install.html), [building](https://nginx.org/en/docs/configure.html), [configuring](https://nginx.org/en/docs/dirindex.html), [debugging](https://nginx.org/en/docs/debugging_log.html), and more. These documentation pages also contain a more detailed [Beginners Guide](https://nginx.org/en/docs/beginners_guide.html), How-Tos, [Development guide](https://nginx.org/en/docs/dev/development_guide.html), and a complete module and [directive reference](https://nginx.org/en/docs/dirindex.html).
 
+# Fork additions: REALITY / JA3 in `ngx_stream_ssl_preread_module`
+
+This fork extends the upstream `ngx_stream_ssl_preread_module` (Stream module) with
+ClientHello inspection that is useful for traffic shaping based on JA3N
+fingerprints and for terminating the [XTLS REALITY](https://github.com/XTLS/REALITY)
+protocol's authentication step.  All additions live in a single source file,
+`src/stream/ngx_stream_ssl_preread_module.c`, and are active only when the
+`ssl_preread` directive is enabled inside a `stream { ... server { ... } }`
+block.
+
+## Directive
+
+```nginx
+ssl_preread on | off [reality=<base64url-encoded-32-byte-private-key>];
+```
+
+The `reality=` parameter is optional.  When present, its value is a
+[base64url](https://datatracker.ietf.org/doc/html/rfc4648#section-5)-encoded
+X25519 private key (32 raw bytes after decoding); this is the same key format
+used by REALITY's server-side configuration.  Without `reality=`, the module
+behaves like upstream's `ssl_preread` but additionally exposes the JA3N and
+prologue variables described below.
+
+## Exposed variables
+
+Upstream variables (unchanged):
+
+| Variable | Value |
+|---|---|
+| `$ssl_preread_protocol` | TLS version negotiated in ClientHello |
+| `$ssl_preread_server_name` | SNI host name |
+| `$ssl_preread_alpn_protocols` | comma-separated ALPN list |
+
+Variables added by this fork:
+
+| Variable | Value |
+|---|---|
+| `$ssl_preread_ja3n` | JA3N fingerprint string (cipher/extension/curve/point-format list with extensions sorted, GREASE values stripped) |
+| `$ssl_preread_ja3n_hash` | MD5 of `$ssl_preread_ja3n` (32 hex chars) |
+| `$ssl_preread_prologue` | hex dump of the first 32 ClientHello bytes |
+| `$ssl_preread_reality_short_id` | see below |
+
+### `$ssl_preread_reality_short_id` semantics
+
+This variable is designed so that `map` / `if` directives can branch on three
+distinct outcomes:
+
+| Configuration / connection state | `$ssl_preread_reality_short_id` |
+|---|---|
+| `reality=` **not** supplied to `ssl_preread` | variable is **absent** (`not_found`) |
+| `reality=` supplied; decrypt succeeded | 16 hex characters — the decrypted ShortId |
+| `reality=` supplied; non-TLS / decrypt failed / no preread context | `"0000000000000000"` (16 hex zeros) |
+
+Decryption follows the REALITY protocol exactly: ECDH(X25519) with the
+ClientHello key_share, HKDF-SHA256 with `random[:20]` as salt and `"REALITY"`
+as info, then AES-256-GCM with `random[20:32]` as nonce and the raw
+ClientHello (session_id position replaced with 32 zero bytes) as additional
+authenticated data.
+
+## Example: route REALITY traffic to a backend, send others to a decoy
+
+```nginx
+stream {
+    map $ssl_preread_reality_short_id $reality_upstream {
+        default             decoy;                # reality not enabled or value not in list
+        "0000000000000000"  decoy;                # reality enabled but auth failed / non-TLS
+        ""                  decoy;                # absent (reality= unset on this server)
+        "0123456789abcdef"  vless_backend_a;
+        "fedcba9876543210"  vless_backend_b;
+    }
+
+    upstream decoy            { server 127.0.0.1:8443; }
+    upstream vless_backend_a  { server 10.0.0.10:443; }
+    upstream vless_backend_b  { server 10.0.0.11:443; }
+
+    server {
+        listen 443;
+        ssl_preread on reality=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8;
+        proxy_pass $reality_upstream;
+    }
+}
+```
+
+## Example: log JA3N for fingerprint analytics
+
+```nginx
+stream {
+    log_format ja3 '$remote_addr $ssl_preread_server_name '
+                   'ja3n=$ssl_preread_ja3n_hash '
+                   'prologue=$ssl_preread_prologue';
+
+    server {
+        listen 443;
+        ssl_preread on;
+        access_log /var/log/nginx/ja3.log ja3;
+        proxy_pass real_backend;
+    }
+}
+```
+
+## Build notes
+
+- Requires OpenSSL 1.1.0 or later for X25519 / HKDF (the module compiles on
+  older OpenSSL but the REALITY decrypt path is disabled).
+- The `--with-stream` and `--with-stream_ssl_preread_module` configure flags
+  enable the module.
+
 # Table of contents
+- [Fork additions: REALITY / JA3 in `ngx_stream_ssl_preread_module`](#fork-additions-reality--ja3-in-ngx_stream_ssl_preread_module)
 - [How it works](#how-it-works)
   - [Modules](#modules)
   - [Configurations](#configurations)
