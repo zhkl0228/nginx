@@ -5,7 +5,839 @@
 <change_log title="nginx">
 
 
-<changes ver="1.28.1" date="2025-12-23">
+<changes ver="1.31.0" date="2026-05-13">
+
+<change type="security">
+<para lang="ru">
+при использовании директивы proxy_set_body атакующий мог вставить данные
+в проксируемый запрос на HTTP/2-бэкенд (CVE-2026-42926).<br/>
+Спасибо Mufeed VH из Winfunc Research.
+</para>
+<para lang="en">
+when using the "proxy_set_body" directive, an attacker might inject data
+in the proxied request to an HTTP/2 backend (CVE-2026-42926).<br/>
+Thanks to Mufeed VH of Winfunc Research.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при обработке специально созданного запроса модулем ngx_http_rewrite_module
+могло происходить переполнение буфера в рабочем процессе,
+что потенциально могло приводить к выполнению произвольного кода
+(CVE-2026-42945).<br/>
+Спасибо Leo Lin.
+</para>
+<para lang="en">
+a heap memory buffer overflow might occur in a worker process
+while handling a specially crafted request by ngx_http_rewrite_module,
+potentially resulting in arbitrary code execution
+(CVE-2026-42945).<br/>
+Thanks to Leo Lin.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при обработке специально созданного ответа модулем ngx_http_scgi_module
+или ngx_http_uwsgi_module могло происходить чтение данных за границами
+буфера рабочего процесса, что позволяло атакующему
+отправить клиенту содержимое памяти рабочего процесса
+или вызвать segmentation fault в рабочем процессе (CVE-2026-42946).<br/>
+Спасибо Leo Lin.
+</para>
+<para lang="en">
+a heap memory buffer overread might occur in a worker process
+while handling a specially crafted response by ngx_http_scgi_module
+or ngx_http_uwsgi_module, allowing an attacker to cause
+a disclosure of worker process memory
+or segmentation fault in a worker process (CVE-2026-42946).<br/>
+Thanks to Leo Lin.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при обработке специально переданного ответа с декодированием из UTF-8
+через директиву charset_map могло происходить чтение данных
+за границами буфера рабочего процесса, что позволяло атакующему
+отправить клиенту ограниченное содержимое памяти рабочего процесса
+или вызвать segmentation fault в рабочем процессе (CVE-2026-42934).<br/>
+Спасибо David Carlier.
+</para>
+<para lang="en">
+a heap memory buffer overread might occur in a worker process
+while handling a specially sent response with decoding from UTF-8
+via the "charset_map" directive, allowing an attacker to cause
+a limited disclosure of worker proccess memory
+or segmentation fault in a worker process (CVE-2026-42934).<br/>
+Thanks to David Carlier.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при использовании HTTP/3 обработка миграции соединения могла приводить
+к созданию QUIC-стримов с новым адресом клиента до завершения валидации,
+что позволяло атакующему выполнить подмену адреса (CVE-2026-40460).<br/>
+Спасибо Rodrigo Laneth.
+</para>
+<para lang="en">
+when using HTTP/3, processing of connection migration might cause
+new QUIC streams to receive a new client address before validation,
+allowing an attacker to cause address spoofing (CVE-2026-40460).<br/>
+Thanks to Rodrigo Laneth.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при использовании директивы ssl_ocsp
+во время обработки ответов DNS-сервера
+могло произойти обращение к ранее освобождённой памяти,
+что позволяло атакующему повредить память рабочего процесса
+или вызвать segmentation fault в рабочем процессе (CVE-2026-40701).<br/>
+Спасибо Leo Lin.
+</para>
+<para lang="en">
+use-after-free might occur
+during DNS server response processing
+if the "ssl_ocsp" directive was used,
+allowing an attacker to cause worker process memory corruption
+or segmentation fault in a worker process (CVE-2026-40701).<br/>
+Thanks to Leo Lin.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+теперь nginx возвращает ошибку, если в запросе по протоколу
+HTTP/2 или HTTP/3 присутствуют строки заголовка "Connection",
+"Proxy-Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade",
+а также "TE" со значением, отличным от "trailers".
+</para>
+<para lang="en">
+now nginx rejects HTTP/2 and HTTP/3 requests with the "Connection",
+"Proxy-Connection", "Keep-Alive", "Transfer-Encoding", "Upgrade"
+header lines, and "TE" with any value other than "trailers".
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+модуль ngx_http_dav_module теперь возвращает ошибку,
+если при обработке COPY- или MOVE-запроса
+исходные и целевые ресурсы совпадают
+или одна коллекция включает в себя другую.
+</para>
+<para lang="en">
+the ngx_http_dav_module now rejects a COPY or MOVE requests
+when the source and destination resources are the same
+or have a parent-child collection relationship.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+уровень логгирования ошибок SSL
+"invalid alert", "record layer failure",
+а также ошибок "SSL alert number N" для любых значений N
+понижен с уровня crit до info.
+</para>
+<para lang="en">
+the logging level of the
+"invalid alert" and "record layer failure" SSL errors,
+and of the "SSL alert number N" for any alert numbers
+has been lowered from "crit" to "info".
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+теперь сборка модуля sticky может быть выключена
+с помощью параметра configure --without-http_upstream_sticky_module;
+параметр configure --without-http_upstream_sticky объявлен устаревшим.
+</para>
+<para lang="en">
+now the "sticky" module can be disabled with the
+--without-http_upstream_sticky_module configure option;
+the --without-http_upstream_sticky configure option is deprecated.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+модуль ngx_http_tunnel_module;
+поддержка аутентификации через прокси-серверы
+в директивах auth_basic, satisfy и auth_delay.
+</para>
+<para lang="en">
+the ngx_http_tunnel_module;
+support for authenticating to proxies
+in the "auth_basic", "satisfy", and "auth_delay" directives.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+директива least_time в блоке upstream.
+</para>
+<para lang="en">
+the "least_time" directive inside the "upstream" block.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+директива proxy_ssl_alpn в модуле stream.
+</para>
+<para lang="en">
+the "proxy_ssl_alpn" directive in the stream module.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+соединения к HTTP/2-бэкендам могли не кэшироваться
+при использовании директив proxy_set_body или proxy_pass_request_body.
+</para>
+<para lang="en">
+connections with HTTP/2 backends might not be cached
+when using the "proxy_set_body" or "proxy_pass_request_body" directives.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+проксированные ответы HTTP/0.9, SCGI или uWSGI
+могли передаваться неверно,
+если первая строка была прочитана не целиком.
+</para>
+<para lang="en">
+proxied HTTP/0.9, SCGI, or uWSGI responses
+might be transferred incorrectly
+if the first line was not fully read.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.29.8" date="2026-04-07">
+
+<change type="feature">
+<para lang="ru">
+директива max_headers.<br/>
+Спасибо Максиму Дунину.
+</para>
+<para lang="en">
+the "max_headers" directive.<br/>
+Thanks to Maxim Dounin.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+совместимость с OpenSSL 4.0.
+</para>
+<para lang="en">
+OpenSSL 4.0 compatibility.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+теперь директива include внутри блока geo поддерживает маски.
+</para>
+<para lang="en">
+now the "include" directive inside the "geo" block supports wildcards.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в обработке ответов с кодом HTTP 103 (Early Hints)
+от проксируемого бэкенда.
+</para>
+<para lang="en">
+in processing of HTTP 103 (Early Hints) responses
+from a proxied backend.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+переменные $request_port и $is_request_port
+были недоступны в подзапросах.
+</para>
+<para lang="en">
+the $request_port and $is_request_port variables
+were not available in subrequests.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.29.7" date="2026-03-24">
+
+<change type="security">
+<para lang="ru">
+при обработке COPY- или MOVE-запроса в location'е с включённым
+alias могло произойти переполнение буфера, что позволяло
+атакующему модифицировать исходный или целевой путь за пределы
+document root (CVE-2026-27654).<br/>
+Спасибо Calif.io при содействии Claude и Anthropic Research.
+</para>
+<para lang="en">
+a buffer overflow might occur while handling a COPY or MOVE
+request in a location with "alias", allowing an attacker
+to modify the source or destination path outside of the
+document root (CVE-2026-27654).<br/>
+Thanks to Calif.io in collaboration with Claude and Anthropic Research.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+обработка специально созданного mp4-файла модулем ngx_http_mp4_module
+на 32-битных платформах могла приводить к падению рабочего процесса,
+а также потенциально могла иметь другие последствия (CVE-2026-27784).<br/>
+Спасибо Prabhav Srinath (sprabhav7).
+</para>
+<para lang="en">
+processing of a specially crafted mp4 file by the ngx_http_mp4_module
+on 32-bit platforms might cause a worker process crash,
+or might have potential other impact (CVE-2026-27784).<br/>
+Thanks to Prabhav Srinath (sprabhav7).
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+обработка специально созданного mp4-файла модулем ngx_http_mp4_module
+могла приводить к падению рабочего процесса, а также потенциально
+могла иметь другие последствия (CVE-2026-32647).<br/>
+Спасибо Xint Code и Pavel Kohout (Aisle Research).
+</para>
+<para lang="en">
+processing of a specially crafted mp4 file by the ngx_http_mp4_module
+might cause a worker process crash, or might have potential
+other impact (CVE-2026-32647).<br/>
+Thanks to Xint Code and Pavel Kohout (Aisle Research).
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+если использовался метод аутентификации CRAM-MD5 или APOP, то
+в рабочем процессе мог произойти segmentation fault,
+если были разрешены повторные попытки аутентификации (CVE-2026-27651).<br/>
+Спасибо Arkadi Vainbrand.
+</para>
+<para lang="en">
+a segmentation fault might occur in a worker process
+if the CRAM-MD5 or APOP authentication methods were used
+and authentication retry was enabled (CVE-2026-27651).<br/>
+Thanks to Arkadi Vainbrand.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+атакующий мог использовать записи PTR DNS чтобы вставить данные
+в auth_http-запросы, а также в команду XCLIENT в SMTP-соединении
+к бекенду (CVE-2026-28753).<br/>
+Спасибо Asim Viladi Oglu Manizada, Colin Warren,
+Xiao Liu (Yunnan University), Yuan Tan (UC Riverside)
+и Bird Liu (Lanzhou University).
+</para>
+<para lang="en">
+an attacker might use PTR DNS records to inject data in
+auth_http requests, as well as in the XCLIENT command in
+the backend SMTP connection (CVE-2026-28753).<br/>
+Thanks to Asim Viladi Oglu Manizada, Colin Warren,
+Xiao Liu (Yunnan University), Yuan Tan (UC Riverside),
+and Bird Liu (Lanzhou University).
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+SSL handshake мог завершиться успешно при том, что OCSP
+отклонил клиентский сертификат в модуле stream (CVE-2026-28755).<br/>
+Спасибо Mufeed VH из Winfunc Research.
+</para>
+<para lang="en">
+SSL handshake might succeed despite OCSP rejecting a client
+certificate in the stream module (CVE-2026-28755).<br/>
+Thanks to Mufeed VH of Winfunc Research.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+параметр multipath директивы listen.
+</para>
+<para lang="en">
+the "multipath" parameter of the "listen" directive.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+параметр local директивы keepalive в блоке upstream.
+</para>
+<para lang="en">
+the "local" parameter of the "keepalive" directive
+in the "upstream" block.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+теперь директива keepalive в блоке upstream включена по умолчанию.
+</para>
+<para lang="en">
+now the "keepalive" directive in the "upstream" block is
+enabled by default.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+теперь модуль ngx_http_proxy_module поддерживает keepalive по умолчанию;
+значение proxy_http_version по умолчанию равно "1.1";
+proxy заголовок "Connection" по умолчанию больше не посылается.
+</para>
+<para lang="en">
+now ngx_http_proxy_module supports keepalive by default;
+the default value for "proxy_http_version" is "1.1";
+the "Connection" proxy header is not sent by default anymore.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+некорректный HTTP/2-запрос мог быть отправлен после переключения
+на следующий бэкенд при использовании буферизованного тела в модуле
+ngx_http_grpc_module.
+</para>
+<para lang="en">
+an invalid HTTP/2 request might be sent after switching to the next
+upstream if buffered body was used in the ngx_http_grpc_module.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.29.6" date="2026-03-10">
+
+<change type="feature">
+<para lang="ru">
+режим привязки сессий;
+директива sticky в блоке upstream модуля http;
+директива server поддерживает параметры route и drain.
+</para>
+<para lang="en">
+session affinity support;
+the "sticky" directive in the "upstream" block of the "http" module;
+the "server" directive supports the "route" and "drain" parameters.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+теперь nginx ограничивает размер и частоту отправки пакетов
+QUIC stateless reset.
+</para>
+<para lang="en">
+now nginx limits the size and rate of QUIC stateless reset packets.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+получение QUIC-пакета в другом рабочем процессе
+могло приводить к разрыву соединения.
+</para>
+<para lang="en">
+receiving a QUIC packet by a wrong worker process
+could cause the connection to terminate.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при отправке закэшированного ответа HTTP/2
+в логах могли появляться сообщения
+"[crit] cache file ... contains invalid header".
+</para>
+<para lang="en">
+"[crit] cache file ... contains invalid header"
+messages might appear in logs
+when sending a cached HTTP/2 response.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+проксирование на scgi-бэкенды могло не работать при использовании
+chunked transfer encoding и директивы scgi_request_buffering.<br/>
+Спасибо Mufeed VH.
+</para>
+<para lang="en">
+proxying to scgi backends might not work when using
+chunked transfer encoding and the "scgi_request_buffering" directive.<br/>
+Thanks to Mufeed VH.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в модуле ngx_http_mp4_module.<br/>
+Спасибо Andrew Lacambra.
+</para>
+<para lang="en">
+in the ngx_http_mp4_module.<br/>
+Thanks to Andrew Lacambra.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+nginx считал запятую разделителем в строке "Cookie"
+заголовка запроса при вычислении переменных "$cookie_...".
+</para>
+<para lang="en">
+nginx treated a comma as separator in the "Cookie"
+request header line when evaluating "$cookie_..." variables.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в парсинге литеральных аргументов IMAP команд.
+</para>
+<para lang="en">
+in IMAP command literal argument parsing.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.29.5" date="2026-02-04">
+
+<change type="security">
+<para lang="ru">
+атакующий мог вставить незашифрованные данные в ответ от
+SSL-бэкенда (CVE-2026-1642).
+</para>
+<para lang="en">
+an attacker might inject plain text data in the response from an SSL
+backend (CVE-2026-1642).
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+обращение к ранее освобождённой памяти могло произойти после
+переключения на следующий gRPC- или HTTP/2-бэкенд.
+</para>
+<para lang="en">
+use-after-free might occur after switching to the next
+gRPC or HTTP/2 backend.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+некорректный HTTP/2-запрос мог быть отправлен после переключения
+на следующий бэкенд.
+</para>
+<para lang="en">
+an invalid HTTP/2 request might be sent after switching to the next
+upstream.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+ответ с несколькими диапазонами мог быть больше, чем исходный ответ.
+</para>
+<para lang="en">
+a response with multiple ranges might be larger than the source
+response.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+исправлена установка переменной HTTP_HOST при проксировании на
+FastCGI-, SCGI- и uwsgi-бэкенды.
+</para>
+<para lang="en">
+fixed setting HTTP_HOST when proxying to FastCGI, SCGI,
+and uwsgi backends.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+устранено предупреждение при компиляции при помощи MSVC 2022 x86.
+</para>
+<para lang="en">
+fixed warning when compiling with MSVC 2022 x86.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+уровень логгирования ошибки SSL "ech_required"
+понижен с уровня crit до info.
+</para>
+<para lang="en">
+the logging level of the "ech_required" SSL error
+has been lowered from "crit" to "info".
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.29.4" date="2025-12-09">
+
+<change type="feature">
+<para lang="ru">
+модуль ngx_http_proxy_module поддерживает HTTP/2.
+</para>
+<para lang="en">
+the ngx_http_proxy_module supports HTTP/2.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+поддержка расширения TLS Encrypted ClientHello
+при использовании ветки разработки ECH OpenSSL;
+директива ssl_ech_file.<br/>
+Спасибо Stephen Farrell.
+</para>
+<para lang="en">
+Encrypted ClientHello TLS extension support
+when using OpenSSL ECH feature branch;
+the "ssl_ech_file" directive.<br/>
+Thanks to Stephen Farrell.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+валидация хоста и порта в строке запроса,
+в заголовке "Host" и псевдо-заголовке ":authority"
+изменена на соответствующую RFC 3986.
+</para>
+<para lang="en">
+validation of host and port in the request line,
+"Host" header field, and ":authority" pseudo-header field
+has been changed to follow RFC 3986.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+теперь одиночный символ LF, используемый для перевода строки
+в chunked-теле запроса или ответа, считается ошибкой.
+</para>
+<para lang="en">
+now a single LF used as a line terminator
+in a chunked request or response body is considered an error.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при использовании HTTP/3 с OpenSSL 3.5.1 и новее
+в рабочем процессе мог произойти segmentation fault;
+ошибка появилась в 1.29.1.<br/>
+Спасибо Jan Svojanovsky.
+</para>
+<para lang="en">
+when using HTTP/3 with OpenSSL 3.5.1 or newer
+a segmentation fault might occur in a worker process;
+the bug had appeared in 1.29.1.<br/>
+Thanks to Jan Svojanovsky.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при совместном использовании директив try_files и proxy_pass с URI
+в рабочем процессе мог произойти segmentation fault.
+</para>
+<para lang="en">
+a segmentation fault might occur in a worker process
+if the "try_files" directive and "proxy_pass" with a URI were used.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.29.3" date="2025-10-28">
+
+<change type="feature">
+<para lang="ru">
+директивы add_header_inherit и add_trailer_inherit.
+</para>
+<para lang="en">
+the "add_header_inherit" and "add_trailer_inherit" directives.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+переменные $request_port и $is_request_port.
+</para>
+<para lang="en">
+the $request_port and $is_request_port variables.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+переменные $ssl_sigalg и $ssl_client_sigalg.
+</para>
+<para lang="en">
+the $ssl_sigalg and $ssl_client_sigalg variables.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+параметр volatile директивы geo.
+</para>
+<para lang="en">
+the "volatile" parameter of the "geo" directive.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+теперь сжатие сертификатов доступно с BoringSSL.
+</para>
+<para lang="en">
+now certificate compression is available with BoringSSL.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+теперь сжатие сертификатов запрещено при включенном OCSP stapling.
+</para>
+<para lang="en">
+now certificate compression is disabled with OCSP stapling.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.29.2" date="2025-10-07">
+
+<change type="feature">
+<para lang="ru">
+теперь nginx можно собрать с AWS-LC.<br/>
+Спасибо Samuel Chiang.
+</para>
+<para lang="en">
+now nginx can be built with AWS-LC.<br/>
+Thanks Samuel Chiang.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+теперь директива ssl_protocols работает
+в виртуальном сервере, отличном от сервера по умолчанию,
+при использовании OpenSSL 1.1.1 и новее.
+</para>
+<para lang="en">
+now the "ssl_protocols" directive works
+in a virtual server different from the default server
+when using OpenSSL 1.1.1 or newer.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при использовании TLSv1.3 с OpenSSL и клиентских сертификатов
+SSL handshake всегда завершался ошибкой
+при восстановлении сессии с другим значением SNI;
+ошибка появилась в 1.27.4.
+</para>
+<para lang="en">
+SSL handshake always failed
+when using TLSv1.3 with OpenSSL and client certificates
+and resuming a session with a different SNI value;
+the bug had appeared in 1.27.4.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при использовании QUIC и директивы ssl_reject_handshake
+в логах могли появляться сообщения
+"ignoring stale global SSL error";
+ошибка появилась в 1.29.0.<br/>
+Спасибо Владимиру Хомутову.
+</para>
+<para lang="en">
+the "ignoring stale global SSL error"
+alerts might appear in logs
+when using QUIC and the "ssl_reject_handshake" directive;
+the bug had appeared in 1.29.0.<br/>
+Thanks to Vladimir Homutov.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в обработке delta-seconds
+в строке "Cache-Control" в заголовке ответа бэкенда.
+</para>
+<para lang="en">
+in delta-seconds processing
+in the "Cache-Control" backend response header line.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+команда XCLIENT не использовала кодировку xtext.<br/>
+Спасибо Igor Morgenstern из Aisle Research.
+</para>
+<para lang="en">
+an XCLIENT command didn't use the xtext encoding.<br/>
+Thanks to Igor Morgenstern of Aisle Research.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в кэшировании SSL-сертификатов во время переконфигурации.
+</para>
+<para lang="en">
+in SSL certificate caching during reconfiguration.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.29.1" date="2025-08-13">
 
 <change type="security">
 <para lang="ru">
@@ -22,14 +854,41 @@ to the authentication server (CVE-2025-53859).
 </para>
 </change>
 
-<change type="bugfix">
+<change type="change">
 <para lang="ru">
-при совместном использовании директив try_files и proxy_pass с URI
-в рабочем процессе мог произойти segmentation fault.
+теперь сжатие сертификатов в протоколе TLSv1.3 по умолчанию запрещено.
 </para>
 <para lang="en">
-a segmentation fault might occur in a worker process
-if the "try_files" directive and "proxy_pass" with a URI were used.
+now TLSv1.3 certificate compression is disabled by default.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+директива ssl_certificate_compression.
+</para>
+<para lang="en">
+the "ssl_certificate_compression" directive.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+поддержка 0-RTT в QUIC при использовании OpenSSL 3.5.1 и новее.
+</para>
+<para lang="en">
+support for 0-RTT in QUIC when using OpenSSL 3.5.1 or newer.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при использовании HTTP/2 и директивы early_hints
+ответ 103 мог буферизироваться.
+</para>
+<para lang="en">
+the 103 response might be buffered
+when using HTTP/2 and the "early_hints" directive.
 </para>
 </change>
 
@@ -59,46 +918,6 @@ when using HTTP/3.
 
 <change type="bugfix">
 <para lang="ru">
-команда XCLIENT не использовала кодировку xtext.<br/>
-Спасибо Igor Morgenstern из Aisle Research.
-</para>
-<para lang="en">
-an XCLIENT command didn't use the xtext encoding.<br/>
-Thanks to Igor Morgenstern of Aisle Research.
-</para>
-</change>
-
-<change type="bugfix">
-<para lang="ru">
-в кешировании SSL-сертификатов во время переконфигурации.
-</para>
-<para lang="en">
-in SSL certificate caching during reconfiguration.
-</para>
-</change>
-
-<change type="bugfix">
-<para lang="ru">
-в обработке delta-seconds
-в строке "Cache-Control" в заголовке ответа бэкенда.
-</para>
-<para lang="en">
-in delta-seconds processing
-in the "Cache-Control" backend response header line.
-</para>
-</change>
-
-<change type="change">
-<para lang="ru">
-бинарная версия nginx/Windows теперь использует для сборки Windows SDK 10.
-</para>
-<para lang="en">
-the native nginx/Windows binary release is now built using Windows SDK 10.
-</para>
-</change>
-
-<change type="bugfix">
-<para lang="ru">
 nginx не собирался под NetBSD 10.0.
 </para>
 <para lang="en">
@@ -108,24 +927,72 @@ nginx could not be built on NetBSD 10.0.
 
 <change type="bugfix">
 <para lang="ru">
-в HTTP/3.
+в работе параметра none директивы smtp_auth.
 </para>
 <para lang="en">
-in HTTP/3.
+in the "none" parameter of the "smtp_auth" directive.
 </para>
 </change>
 
 </changes>
 
 
-<changes ver="1.28.0" date="2025-04-23">
+<changes ver="1.29.0" date="2025-06-24">
 
-<change>
+<change type="feature">
 <para lang="ru">
-Стабильная ветка 1.28.x.
+поддержка ответа с кодом 103 от proxy- и gRPC-бэкендов;
+директива early_hints.
 </para>
 <para lang="en">
-1.28.x stable branch.
+support for response code 103 from proxy and gRPC backends;
+the "early_hints" directive.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+возможность загрузки секретных ключей с аппаратных устройств
+с помощью OpenSSL provider.
+</para>
+<para lang="en">
+loading of secret keys from hardware tokens
+with OpenSSL provider.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+поддержка параметра so_keepalive директивы listen на macOS.
+</para>
+<para lang="en">
+support for the "so_keepalive" parameter of the "listen" directive on macOS.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+уровень логгирования ошибок SSL в QUIC handshake
+изменён с уровня error на crit для критических ошибок
+и на info для всех остальных;
+уровень логгирования неподдерживаемых транспортных параметров QUIC
+понижен с уровня info до debug.
+</para>
+<para lang="en">
+the logging level of SSL errors in a QUIC handshake
+has been changed from "error" to "crit" for critical errors,
+and to "info" for the rest;
+the logging level of unsupported QUIC transport parameters
+has been lowered from "info" to "debug".
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+бинарная версия nginx/Windows теперь использует для сборки Windows SDK 10.
+</para>
+<para lang="en">
+the native nginx/Windows binary release is now built using Windows SDK 10.
 </para>
 </change>
 
@@ -151,6 +1018,15 @@ if ngx_http_v3_module was used.
 </para>
 </change>
 
+<change>
+<para lang="ru">
+Исправления и улучшения в HTTP/3.
+</para>
+<para lang="en">
+Bugfixes and improvements in HTTP/3.
+</para>
+</change>
+
 </changes>
 
 
@@ -167,7 +1043,7 @@ CUBIC congestion control in QUIC connections.
 
 <change type="change">
 <para lang="ru">
-ограничение на максимальный размер кешируемых в разделяемой памяти
+ограничение на максимальный размер кэшируемых в разделяемой памяти
 SSL-сессий поднято до 8192.
 </para>
 <para lang="en">
@@ -426,7 +1302,7 @@ in the "proxy_store" directive.
 
 <change type="feature">
 <para lang="ru">
-SSL-сертификаты, секретные ключи и списки CRL теперь кешируются
+SSL-сертификаты, секретные ключи и списки CRL теперь кэшируются
 на старте или во время переконфигурации.
 </para>
 <para lang="en">
@@ -636,7 +1512,7 @@ directive in the stream module.
 
 <change type="feature">
 <para lang="ru">
-определение размера строки кеша процессора для некоторых архитектур.<br/>
+определение размера строки кэша процессора для некоторых архитектур.<br/>
 Спасибо Piotr Sikora.
 </para>
 <para lang="en">
@@ -8692,7 +9568,7 @@ Thanks to Piotr Sikora.
 Спасибо Piotr Sikora.
 </para>
 <para lang="en">
-now nginx can be build with BoringSSL and LibreSSL.<br/>
+now nginx can be built with BoringSSL and LibreSSL.<br/>
 Thanks to Piotr Sikora.
 </para>
 </change>
@@ -15733,7 +16609,7 @@ listen unix domain socket had limited access rights.
 
 <change type="bugfix">
 <para lang="ru">
-закэшированные ответы ответов HTTP/0.9 неправильно обрабатывались.
+закэшированные ответы HTTP/0.9 неправильно обрабатывались.
 </para>
 <para lang="en">
 cached HTTP/0.9 responses were handled incorrectly.
@@ -25975,7 +26851,7 @@ the ECONNABORTED error log level was changed to "error" from "crit".
 модуль ngx_http_perl_module не собирался без модуля ngx_http_ssi_filter_module.
 </para>
 <para lang="en">
-the ngx_http_perl_module could not be build without
+the ngx_http_perl_module could not be built without
 the ngx_http_ssi_filter_module.
 </para>
 </change>
