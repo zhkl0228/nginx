@@ -3789,53 +3789,6 @@ ngx_http_v2_construct_host_header(ngx_http_request_t *r)
 }
 
 
-static ngx_int_t
-ngx_http_v2_construct_host_header(ngx_http_request_t *r)
-{
-    ngx_table_elt_t            *h;
-    ngx_http_header_t          *hh;
-    ngx_http_core_main_conf_t  *cmcf;
-
-    static ngx_str_t host = ngx_string("host");
-
-    h = ngx_list_push(&r->headers_in.headers);
-    if (h == NULL) {
-        ngx_http_v2_close_stream(r->stream, NGX_HTTP_INTERNAL_SERVER_ERROR);
-        return NGX_ERROR;
-    }
-
-    h->hash = ngx_hash(ngx_hash(ngx_hash('h', 'o'), 's'), 't');
-
-    h->key.len = host.len;
-    h->key.data = host.data;
-
-    h->value.len = r->host_end - r->host_start;
-    h->value.data = r->host_start;
-
-    h->lowcase_key = host.data;
-
-    cmcf = ngx_http_get_module_main_conf(r, ngx_http_core_module);
-
-    hh = ngx_hash_find(&cmcf->headers_in_hash, h->hash,
-                       h->lowcase_key, h->key.len);
-
-    if (hh == NULL) {
-        ngx_http_v2_close_stream(r->stream, NGX_HTTP_INTERNAL_SERVER_ERROR);
-        return NGX_ERROR;
-    }
-
-    if (hh->handler(r, h, hh->offset) != NGX_OK) {
-        /*
-         * request has been finalized already
-         * in ngx_http_process_host()
-         */
-        return NGX_ERROR;
-    }
-
-    return NGX_OK;
-}
-
-
 static void
 ngx_http_v2_run_request(ngx_http_request_t *r)
 {
