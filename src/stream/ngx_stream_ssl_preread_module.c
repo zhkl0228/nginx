@@ -1190,23 +1190,24 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
     ngx_stream_ssl_preread_srv_conf_t  *sscf;
 
     ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
+    sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_ssl_preread_module);
 
-    if (ctx == NULL) {
+    /* When no reality_key is configured, leave the variable absent so
+       map/if directives can detect "reality not enabled" via $variable
+       being unset.  Once a key is configured, always emit 16 hex chars:
+       real short_id on successful decrypt, all-zero otherwise. */
+    if (!is_reality_key_valid(sscf)) {
         v->not_found = 1;
         return NGX_OK;
     }
 
     /* Decrypt on first access */
-    if (!ctx->reality_decrypted && ctx->is_ssl) {
-        sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_ssl_preread_module);
-
-        if (is_reality_key_valid(sscf)) {
-            if (ngx_stream_reality_decrypt_short_id(ctx, sscf->reality_key.data,
-                                                    ctx->reality_short_id,
-                                                    NULL, NULL,
-                                                    s->connection->log) == NGX_OK) {
-                ctx->reality_decrypted = 1;
-            }
+    if (ctx != NULL && !ctx->reality_decrypted && ctx->is_ssl) {
+        if (ngx_stream_reality_decrypt_short_id(ctx, sscf->reality_key.data,
+                                                ctx->reality_short_id,
+                                                NULL, NULL,
+                                                s->connection->log) == NGX_OK) {
+            ctx->reality_decrypted = 1;
         }
     }
 
@@ -1215,7 +1216,11 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
         return NGX_ERROR;
     }
 
-    ngx_hex_dump(v->data, ctx->reality_short_id, REALITY_SHORT_ID_SIZE);
+    if (ctx != NULL) {
+        ngx_hex_dump(v->data, ctx->reality_short_id, REALITY_SHORT_ID_SIZE);
+    } else {
+        ngx_memset(v->data, '0', REALITY_SHORT_ID_SIZE * 2);
+    }
     v->len = REALITY_SHORT_ID_SIZE * 2;
     v->valid = 1;
     v->no_cacheable = 1;
