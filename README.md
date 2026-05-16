@@ -41,6 +41,13 @@ used by REALITY's server-side configuration.  Without `reality=`, the module
 behaves like upstream's `ssl_preread` but additionally exposes the JA3N and
 prologue variables described below.
 
+> [!NOTE]
+> `reality=` requires nginx to be built with OpenSSL support
+> (any of `--with-http_ssl_module`, `--with-stream_ssl_module`, or
+> `--with-openssl=PATH`).  Without OpenSSL, the parameter is rejected at
+> configuration load time with a clear error.  See [Build notes](#build-notes)
+> below.
+
 ## Exposed variables
 
 Upstream variables (unchanged):
@@ -58,7 +65,7 @@ Variables added by this fork:
 | `$ssl_preread_ja3n` | JA3N fingerprint string (cipher/extension/curve/point-format list with extensions sorted, GREASE values stripped) |
 | `$ssl_preread_ja3n_hash` | MD5 of `$ssl_preread_ja3n` (32 hex chars) |
 | `$ssl_preread_prologue` | hex dump of the first 32 ClientHello bytes |
-| `$ssl_preread_reality_short_id` | see below |
+| `$ssl_preread_reality_short_id` | see below — **requires OpenSSL build** |
 
 ### `$ssl_preread_reality_short_id` semantics
 
@@ -120,10 +127,24 @@ stream {
 
 ## Build notes
 
-- Requires OpenSSL 1.1.0 or later for X25519 / HKDF (the module compiles on
-  older OpenSSL but the REALITY decrypt path is disabled).
-- The `--with-stream` and `--with-stream_ssl_preread_module` configure flags
-  enable the module.
+The module splits cleanly into an OpenSSL-free path (JA3N, prologue, SNI,
+ALPN, ClientHello parsing) and an OpenSSL-dependent path (REALITY
+decryption).  Which features compile in is controlled at `auto/configure`
+time by whether any SSL-enabling flag is passed:
+
+| Configure flags | Compiled features |
+|---|---|
+| `--with-stream --with-stream_ssl_preread_module` | JA3N, prologue, SNI, ALPN, ClientHello parsing.  `reality=` parameter on `ssl_preread` is rejected with a config error; `$ssl_preread_reality_short_id` is always absent. |
+| Above plus `--with-http_ssl_module` or `--with-stream_ssl_module` or `--with-openssl=PATH` | All of the above **plus** REALITY decryption and `$ssl_preread_reality_short_id`. |
+
+The REALITY path additionally requires OpenSSL 1.1.0 or later for X25519 and
+HKDF; older OpenSSL versions compile but the decrypt routine short-circuits
+to a failure.
+
+Implementation detail: REALITY-specific code is gated by `#if (NGX_OPENSSL)`
+inside `src/stream/ngx_stream_ssl_preread_module.c`, mirroring how the rest
+of the nginx tree (e.g. `src/core/ngx_core.h`) gates its OpenSSL
+dependencies.
 
 # Table of contents
 - [Fork additions: REALITY / JA3 in `ngx_stream_ssl_preread_module`](#fork-additions-reality--ja3-in-ngx_stream_ssl_preread_module)
