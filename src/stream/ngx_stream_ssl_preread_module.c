@@ -21,6 +21,10 @@
 #define REALITY_SESSION_ID_SIZE 32
 #define REALITY_RANDOM_SIZE 32
 
+/* Offset of session_id within ClientHello body (no record header):
+ *   msg_type(1) + length(3) + version(2) + random(32) + sid_len(1) = 39 */
+#define REALITY_PRE_SID_OFFSET 39
+
 #define PROLOGUE_SIZE 32
 
 typedef struct {
@@ -493,11 +497,14 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
             }
 
             if (is_reality_key_valid(sscf)) {
-                /* save raw ClientHello record (without 5-byte TLS header) */
-                ctx->raw.len = len;
-                ctx->raw.data = ngx_pnalloc(ctx->pool, ctx->raw.len);
-                if (ctx->raw.data != NULL) {
-                    ngx_memcpy(ctx->raw.data, p, ctx->raw.len);
+                /* save raw ClientHello record (without 5-byte TLS header);
+                   only commit len after a successful allocation so downstream
+                   code can rely on (data != NULL) iff (len > 0) */
+                u_char  *raw_data = ngx_pnalloc(ctx->pool, len);
+                if (raw_data != NULL) {
+                    ngx_memcpy(raw_data, p, len);
+                    ctx->raw.data = raw_data;
+                    ctx->raw.len = len;
                 }
             }
 
@@ -1492,16 +1499,30 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
         goto cleanup;
     }
 
-    /* 3. Prepare AAD (Additional Authenticated Data) */
-    /* Use ctx->raw directly, zero out SessionId position */
-    if (ctx->raw.len < 71) {
-        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
-            "reality: raw data too short");
+    /* 3. Prepare AAD (Additional Authenticated Data)
+     *
+     * ClientHello body layout (without 5-byte TLS record header):
+     *   msg_type(1) + length(3) + version(2) + random(32) + sid_len(1) = 39
+     *   followed by session_id of REALITY_SESSION_ID_SIZE bytes.
+     *
+     * The AAD is the captured ClientHello with the 32-byte session_id
+     * position replaced by zeros.  Build it from three segments so the
+     * original ctx->raw is not mutated and can be retried/inspected. */
+    if (ctx->raw.data == NULL
+        || ctx->raw.len < REALITY_PRE_SID_OFFSET + REALITY_SESSION_ID_SIZE)
+    {
+        ngx_log_debug2(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: raw data invalid (data=%p, len=%uz)",
+            ctx->raw.data, ctx->raw.len);
         goto cleanup;
     }
 
-    /* Zero out SessionId position (offset 39, length 32) for GCM AAD */
-    ngx_memzero(ctx->raw.data + 39, REALITY_SESSION_ID_SIZE);
+    if (ctx->raw.data[REALITY_PRE_SID_OFFSET - 1] != REALITY_SESSION_ID_SIZE) {
+        ngx_log_debug1(NGX_LOG_DEBUG_STREAM, log, 0,
+            "reality: unexpected session_id length in raw (got %ud)",
+            (unsigned) ctx->raw.data[REALITY_PRE_SID_OFFSET - 1]);
+        goto cleanup;
+    }
 
     /* 4. AES-256-GCM decryption */
     cipher_ctx = EVP_CIPHER_CTX_new();
@@ -1527,12 +1548,23 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
         goto cleanup;
     }
 
-    if (EVP_DecryptUpdate(cipher_ctx, NULL, &len,
-            ctx->raw.data, ctx->raw.len) != 1)
     {
-        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
-            "reality: EVP_DecryptUpdate(AAD) failed");
-        goto cleanup;
+        static const u_char  zero_sid[REALITY_SESSION_ID_SIZE] = { 0 };
+        size_t               after_sid_off = REALITY_PRE_SID_OFFSET
+                                             + REALITY_SESSION_ID_SIZE;
+
+        if (EVP_DecryptUpdate(cipher_ctx, NULL, &len,
+                              ctx->raw.data, REALITY_PRE_SID_OFFSET) != 1
+            || EVP_DecryptUpdate(cipher_ctx, NULL, &len,
+                                 zero_sid, REALITY_SESSION_ID_SIZE) != 1
+            || EVP_DecryptUpdate(cipher_ctx, NULL, &len,
+                                 ctx->raw.data + after_sid_off,
+                                 ctx->raw.len - after_sid_off) != 1)
+        {
+            ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+                "reality: EVP_DecryptUpdate(AAD) failed");
+            goto cleanup;
+        }
     }
 
     if (EVP_DecryptUpdate(cipher_ctx, plaintext, &len,
