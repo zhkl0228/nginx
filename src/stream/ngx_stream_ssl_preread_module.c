@@ -847,6 +847,13 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
                     state = sw_ext;
                 } else {
                     /* skip this key_share entry */
+                    if (ext < key_len) {
+                        ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                       "ssl preread: key_share entry truncated"
+                                       " (key_len=%uD, remaining=%uz)",
+                                       (uint32_t) key_len, ext);
+                        return NGX_DECLINED;
+                    }
                     dst = NULL;
                     size = key_len;
                     ext -= key_len;
