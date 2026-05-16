@@ -25,7 +25,7 @@
 
 typedef struct {
     ngx_flag_t      enabled;
-    ngx_str_t       realityKey;
+    ngx_str_t       reality_key;
 } ngx_stream_ssl_preread_srv_conf_t;
 
 
@@ -116,7 +116,7 @@ ngx_ssl_ja3_fp(ngx_pool_t *pool, ngx_ssl_ja3_t *ja3, ngx_str_t *out)
         return 2;
     }
 
-    size = (total + 1) * 6;
+    size = (total + 1) * 6 + 16;
     cur = ngx_pnalloc(pool, size);
     if (cur == NULL) {
         return 3;
@@ -729,7 +729,10 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
 
             if (ctx->ja3.extensions_sz == 0 && ctx->ja3.extensions == NULL) {
                 size_t ext_size = (p[0] << 8) + p[1];
-                ctx->ja3.extensions = ngx_pnalloc(ctx->pool, ext_size);
+                /* each extension occupies at least 4 wire bytes (type+len),
+                   so capacity in u_short slots is ext_size/4 + 1 for safety */
+                ctx->ja3.extensions = ngx_pnalloc(ctx->pool,
+                                                  (ext_size / 4 + 1) * sizeof(u_short));
             }
             state = sw_ext_header;
             dst = p;
@@ -1143,7 +1146,7 @@ ngx_stream_ssl_preread_alpn_protocols_variable(ngx_stream_session_t *s,
 static ngx_flag_t
 is_reality_key_valid(ngx_stream_ssl_preread_srv_conf_t *sscf)
 {
-    if (sscf->realityKey.data != NULL && sscf->realityKey.len == REALITY_KEY_SIZE) {
+    if (sscf->reality_key.data != NULL && sscf->reality_key.len == REALITY_KEY_SIZE) {
         return 1;
     } else {
         return 0;
@@ -1169,7 +1172,7 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
         sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_ssl_preread_module);
 
         if (is_reality_key_valid(sscf)) {
-            if (ngx_stream_reality_decrypt_short_id(ctx, sscf->realityKey.data,
+            if (ngx_stream_reality_decrypt_short_id(ctx, sscf->reality_key.data,
                                                     ctx->reality_short_id,
                                                     NULL, NULL,
                                                     s->connection->log) == NGX_OK) {
@@ -1223,7 +1226,7 @@ ngx_stream_ssl_preread_create_srv_conf(ngx_conf_t *cf)
     }
 
     conf->enabled = NGX_CONF_UNSET;
-    ngx_str_null(&conf->realityKey);
+    ngx_str_null(&conf->reality_key);
 
     return conf;
 }
@@ -1236,7 +1239,7 @@ ngx_stream_ssl_preread_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_stream_ssl_preread_srv_conf_t *conf = child;
 
     ngx_conf_merge_value(conf->enabled, prev->enabled, 0);
-    ngx_conf_merge_str_value(conf->realityKey, prev->realityKey, "");
+    ngx_conf_merge_str_value(conf->reality_key, prev->reality_key, "");
 
     return NGX_CONF_OK;
 }
@@ -1293,7 +1296,7 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
             }
 
             /* Store the decoded key */
-            sscf->realityKey = decoded;
+            sscf->reality_key = decoded;
             continue;
         }
 
@@ -1309,19 +1312,19 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }
 
     if (cf->log->log_level >= NGX_LOG_DEBUG) {
-        if (sscf->realityKey.data != NULL && sscf->realityKey.len > 0) {
-            u_char  *hex_buf = ngx_pnalloc(cf->pool, sscf->realityKey.len * 2 + 1);
+        if (sscf->reality_key.data != NULL && sscf->reality_key.len > 0) {
+            u_char  *hex_buf = ngx_pnalloc(cf->pool, sscf->reality_key.len * 2 + 1);
             if (hex_buf != NULL) {
-                ngx_hex_dump(hex_buf, sscf->realityKey.data, sscf->realityKey.len);
-                hex_buf[sscf->realityKey.len * 2] = '\0';
+                ngx_hex_dump(hex_buf, sscf->reality_key.data, sscf->reality_key.len);
+                hex_buf[sscf->reality_key.len * 2] = '\0';
 
                 ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
-                                  "ssl_preread: enabled=%d, realityKey=%*s",
-                                  sscf->enabled, sscf->realityKey.len * 2, hex_buf);
+                                  "ssl_preread: enabled=%d, reality_key=%*s",
+                                  sscf->enabled, sscf->reality_key.len * 2, hex_buf);
             }
         } else {
             ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
-                              "ssl_preread: enabled=%d, realityKey=(empty)",
+                              "ssl_preread: enabled=%d, reality_key=(empty)",
                               sscf->enabled);
         }
     }
@@ -1514,15 +1517,16 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
     }
 
     if (EVP_DecryptUpdate(cipher_ctx, plaintext, &len,
-            ctx->session_id.data, 16) != 1)
+            ctx->session_id.data, REALITY_SESSION_ID_SIZE / 2) != 1)
     {
         ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
             "reality: EVP_DecryptUpdate(ciphertext) failed");
         goto cleanup;
     }
 
-    if (EVP_CIPHER_CTX_ctrl(cipher_ctx, EVP_CTRL_GCM_SET_TAG, 16,
-            ctx->session_id.data + 16) != 1)
+    if (EVP_CIPHER_CTX_ctrl(cipher_ctx, EVP_CTRL_GCM_SET_TAG,
+            REALITY_SESSION_ID_SIZE / 2,
+            ctx->session_id.data + REALITY_SESSION_ID_SIZE / 2) != 1)
     {
         ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
             "reality: EVP_CIPHER_CTX_ctrl(SET_TAG) failed");
