@@ -1337,23 +1337,15 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
         return NGX_CONF_ERROR;
     }
 
-    if (cf->log->log_level >= NGX_LOG_DEBUG) {
-        if (sscf->reality_key.data != NULL && sscf->reality_key.len > 0) {
-            u_char  *hex_buf = ngx_pnalloc(cf->pool, sscf->reality_key.len * 2 + 1);
-            if (hex_buf != NULL) {
-                ngx_hex_dump(hex_buf, sscf->reality_key.data, sscf->reality_key.len);
-                hex_buf[sscf->reality_key.len * 2] = '\0';
-
-                ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
-                                  "ssl_preread: enabled=%d, reality_key=%*s",
-                                  sscf->enabled, sscf->reality_key.len * 2, hex_buf);
-            }
-        } else {
-            ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
-                              "ssl_preread: enabled=%d, reality_key=(empty)",
-                              sscf->enabled);
-        }
-    }
+    /* Never log the reality_key value (it is a private key).  Report only
+       whether it is configured so the operator can confirm the directive
+       was parsed. */
+    ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
+                      "ssl_preread: enabled=%d, reality_key=%s (len=%uz)",
+                      sscf->enabled,
+                      (sscf->reality_key.data != NULL
+                       && sscf->reality_key.len > 0) ? "set" : "(empty)",
+                      sscf->reality_key.len);
 
     return NGX_CONF_OK;
 }
