@@ -69,14 +69,22 @@ Variables added by this fork:
 
 ### `$ssl_preread_reality_short_id` semantics
 
-This variable is designed so that `map` / `if` directives can branch on three
-distinct outcomes:
+The value is **always exactly 16 characters** when `reality=` is configured, so
+`map` / `if` directives can do simple exact-string matches.  On a successful
+decrypt it is the hex ShortId (`[0-9a-f]{16}`); otherwise it is a readable
+sentinel naming the reason.  Every failure sentinel begins with `no-`, so a
+single `map` rule (`~^no-`) routes all failures at once, while the suffix still
+tells you why.  Because the sentinels contain non-hex characters, they can never
+be confused with a real ShortId — including the case where the real ShortId
+happens to be `0000000000000000`.
 
 | Configuration / connection state | `$ssl_preread_reality_short_id` |
 |---|---|
 | `reality=` **not** supplied to `ssl_preread` | variable is **absent** (`not_found`) |
-| `reality=` supplied; decrypt succeeded | 16 hex characters — the decrypted ShortId |
-| `reality=` supplied; non-TLS / decrypt failed / no preread context | `"0000000000000000"` (16 hex zeros) |
+| `reality=` supplied; decrypt succeeded | 16 hex characters — the decrypted ShortId (may be `0000000000000000` if that is the real ShortId) |
+| `reality=` supplied; no TLS ClientHello (non-TLS, or no preread context) | `"no-tls----------"` |
+| `reality=` supplied; TLS, but no 32-byte session_id / X25519 key_share (e.g. a TLS 1.2 client) | `"no-reality------"` |
+| `reality=` supplied; REALITY-shaped ClientHello but GCM decryption failed (wrong key, decoy TLS 1.3 client, or tampering) | `"no-decrypt------"` |
 
 Decryption follows the REALITY protocol exactly: ECDH(X25519) with the
 ClientHello key_share, HKDF-SHA256 with `random[:20]` as salt and `"REALITY"`
@@ -89,11 +97,11 @@ authenticated data.
 ```nginx
 stream {
     map $ssl_preread_reality_short_id $reality_upstream {
-        default             decoy;                # reality not enabled or value not in list
-        "0000000000000000"  decoy;                # reality enabled but auth failed / non-TLS
         ""                  decoy;                # absent (reality= unset on this server)
+        ~^no-               decoy;                # any failure: no-tls / no-reality / no-decrypt
         "0123456789abcdef"  vless_backend_a;
         "fedcba9876543210"  vless_backend_b;
+        default             decoy;                # valid ShortId not in our list
     }
 
     upstream decoy            { server 127.0.0.1:8443; }
@@ -106,6 +114,41 @@ stream {
         proxy_pass $reality_upstream;
     }
 }
+```
+
+## Example: log the REALITY outcome (and failure reason)
+
+Because every failure value starts with `no-`, a single `~^no-` rule turns the
+variable into a coarse `ok` / `fail` flag while the raw value keeps the exact
+reason (`no-tls`, `no-reality`, `no-decrypt`) for the access log:
+
+```nginx
+stream {
+    map $ssl_preread_reality_short_id $reality_status {
+        ""        not-configured;   # reality= unset on this server
+        ~^no-     fail;             # no-tls / no-reality / no-decrypt
+        default   ok;               # a real ShortId was decrypted
+    }
+
+    log_format reality '$remote_addr $ssl_preread_server_name '
+                       'status=$reality_status '
+                       'short_id=$ssl_preread_reality_short_id';
+
+    server {
+        listen 443;
+        ssl_preread on reality=AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8;
+        access_log /var/log/nginx/reality.log reality;
+        proxy_pass $reality_upstream;   # see the routing example above
+    }
+}
+```
+
+Sample log lines:
+
+```
+203.0.113.7  www.example.com  status=ok    short_id=0123456789abcdef
+198.51.100.4 www.example.com  status=fail  short_id=no-decrypt------
+192.0.2.9    -                status=fail  short_id=no-tls----------
 ```
 
 ## Example: log JA3N for fingerprint analytics

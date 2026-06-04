@@ -1190,6 +1190,8 @@ static ngx_int_t
 ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
     ngx_stream_variable_value_t *v, uintptr_t data)
 {
+    u_char                             *p;
+    ngx_str_t                           reason;
     ngx_stream_ssl_preread_ctx_t       *ctx;
     ngx_stream_ssl_preread_srv_conf_t  *sscf;
 
@@ -1198,8 +1200,11 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
 
     /* When no reality_key is configured, leave the variable absent so
        map/if directives can detect "reality not enabled" via $variable
-       being unset.  Once a key is configured, always emit 16 hex chars:
-       real short_id on successful decrypt, all-zero otherwise. */
+       being unset.  Once a key is configured, the value is always exactly
+       16 characters: the real hex ShortId on a successful decrypt, otherwise
+       a readable sentinel describing why decryption did not happen.  The
+       sentinels contain non-hex characters, so they can never be mistaken
+       for a genuine ShortId (which is always [0-9a-f]{16}). */
     if (!is_reality_key_valid(sscf)) {
         v->not_found = 1;
         return NGX_OK;
@@ -1217,20 +1222,50 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
     }
 #endif
 
-    v->data = ngx_pnalloc(s->connection->pool, REALITY_SHORT_ID_SIZE * 2);
-    if (v->data == NULL) {
-        return NGX_ERROR;
-    }
-
-    if (ctx != NULL) {
-        ngx_hex_dump(v->data, ctx->reality_short_id, REALITY_SHORT_ID_SIZE);
-    } else {
-        ngx_memset(v->data, '0', REALITY_SHORT_ID_SIZE * 2);
-    }
-    v->len = REALITY_SHORT_ID_SIZE * 2;
     v->valid = 1;
     v->no_cacheable = 1;
     v->not_found = 0;
+
+    /* Successful decrypt: emit the real 16-hex ShortId.  This may legitimately
+       be "0000000000000000" when that is the actual ShortId, which is now
+       distinguishable from the failure states below. */
+    if (ctx != NULL && ctx->reality_decrypted) {
+        p = ngx_pnalloc(s->connection->pool, REALITY_SHORT_ID_SIZE * 2);
+        if (p == NULL) {
+            return NGX_ERROR;
+        }
+
+        ngx_hex_dump(p, ctx->reality_short_id, REALITY_SHORT_ID_SIZE);
+        v->data = p;
+        v->len = REALITY_SHORT_ID_SIZE * 2;
+
+        return NGX_OK;
+    }
+
+    /* No usable ShortId: report a readable 16-char reason instead of a single
+       ambiguous all-zero value.  All three reasons share a "no-" prefix so a
+       single map rule (~^no-) can route every failure, while the suffix still
+       names the cause. */
+    if (ctx == NULL || !ctx->is_ssl) {
+        /* no preread context, or the connection carried no TLS ClientHello */
+        ngx_str_set(&reason, "no-tls----------");
+
+    } else if (ctx->session_id.len != REALITY_SESSION_ID_SIZE
+               || ctx->public_key.len != REALITY_KEY_SIZE)
+    {
+        /* a TLS ClientHello, but missing the 32-byte session_id or the X25519
+           key_share REALITY depends on: an ordinary (e.g. TLS 1.2) client */
+        ngx_str_set(&reason, "no-reality------");
+
+    } else {
+        /* REALITY-shaped ClientHello, but AES-256-GCM decryption/authentication
+           failed: wrong reality= key, a non-REALITY TLS 1.3 client (decoy
+           traffic), or a tampered/replayed handshake */
+        ngx_str_set(&reason, "no-decrypt------");
+    }
+
+    v->data = reason.data;
+    v->len = reason.len;
 
     return NGX_OK;
 }
