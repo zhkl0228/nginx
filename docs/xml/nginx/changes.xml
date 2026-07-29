@@ -5,6 +5,322 @@
 <change_log title="nginx">
 
 
+<changes ver="1.31.3" date="2026-07-15">
+
+<change type="security">
+<para lang="ru">
+при использовании директивы map c регулярными выражениями
+могло произойти переполнение буфера в рабочем процессе, если
+map-переменная была указана в строковом выражении после выделения,
+модифицируемого этим блоком map; похожая проблема могла произойти
+при использовании некешируемой переменной в строковом выражении
+(CVE-2026-42533).<br/>
+Спасибо Mufeed VH из Winfunc Research и Максиму Дунину.
+</para>
+<para lang="en">
+heap buffer overflow might occur in a worker process when using the
+map directive with regex matching if the map variable was included
+in a string expression after a capture affected by this map;
+a similar issue might happen when using a non-cacheable variable in
+a string expression (CVE-2026-42533).<br/>
+Thanks to Mufeed VH of Winfunc Research and Maxim Dounin.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при использовании неименованных выделений с директивой slice или
+фоновым обновлением кэша мог произойти доступ к неинициализированной
+памяти, что могло привести к отправке клиенту содержимого памяти
+рабочего процесса или вызвать segmentation fault в рабочем процессе
+(CVE-2026-60005).
+</para>
+<para lang="en">
+uninitialized memory access might occur when using unnamed regex
+captures with the "slice" directive or background cache update, which
+could result in worker process memory disclosure or worker process
+termination (CVE-2026-60005).
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при использовании ngx_http_ssi_filter_module специально созданный
+ответ от проксируемого бэкенда мог привести к обращению к ранее
+освобождённой памяти (CVE-2026-56434).<br/>
+Спасибо P4P3R-HAK.
+</para>
+<para lang="en">
+use-after-free might occur when processing a specially crafted proxied
+backend response with the ngx_http_ssi_filter_module (CVE-2026-56434).<br/>
+Thanks to P4P3R-HAK.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+размер заголовков и трейлеров HTTP/2-ответа
+в модуле ngx_http_proxy_v2_module и ngx_http_grpc_module
+теперь ограничены директивой proxy_buffer_size и grpc_buffer_size.
+</para>
+<para lang="en">
+the size of headers and trailers in HTTP/2 responses
+in the ngx_http_proxy_v2_module and ngx_http_grpc_module
+is now limited with "proxy_buffer_size" and "grpc_buffer_size" directives.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+загрузка внешних сущностей теперь отключена
+в модуле ngx_http_xslt_filter_module.<br/>
+Спасибо Максиму Дунину.
+</para>
+<para lang="en">
+loading of external entities is now disabled
+in the ngx_http_xslt_filter_module.<br/>
+Thanks to Maxim Dounin.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+директива xml_external_entities
+в модуле ngx_http_xslt_filter_module.<br/>
+Спасибо Максиму Дунину.
+</para>
+<para lang="en">
+the "xml_external_entities" directive
+in the ngx_http_xslt_filter_module.<br/>
+Thanks to Maxim Dounin.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+директивы proxy_socket_sndbuf, proxy_socket_rcvbuf,
+fastcgi_socket_sndbuf, fastcgi_socket_rcvbuf,
+grpc_socket_sndbuf, grpc_socket_rcvbuf,
+scgi_socket_sndbuf, scgi_socket_rcvbuf,
+uwsgi_socket_sndbuf, uwsgi_socket_rcvbuf,
+tunnel_socket_sndbuf и tunnel_socket_rcvbuf.
+</para>
+<para lang="en">
+the "proxy_socket_sndbuf", "proxy_socket_rcvbuf",
+"fastcgi_socket_sndbuf", "fastcgi_socket_rcvbuf",
+"grpc_socket_sndbuf", "grpc_socket_rcvbuf",
+"scgi_socket_sndbuf", "scgi_socket_rcvbuf",
+"uwsgi_socket_sndbuf", "uwsgi_socket_rcvbuf",
+"tunnel_socket_sndbuf", and "tunnel_socket_rcvbuf"
+directives.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+определение размера строки кэша процессора для loongarch64.<br/>
+Спасибо Miao Wang.
+</para>
+<para lang="en">
+cache line size detection for loongarch64.<br/>
+Thanks to Miao Wang.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+теперь nginx возвращает ошибку, если в запросе по протоколу
+HTTP/2 псевдо-заголовки следуют за обычными заголовками.
+</para>
+<para lang="en">
+now nginx rejects HTTP/2 requests with out-of-order pseudo-headers.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в управлении потоком в модуле ngx_http_v2_module.
+</para>
+<para lang="en">
+in flow control in the ngx_http_v2_module.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+при отправке закэшированного ответа HTTP/2
+в модуле ngx_http_proxy_v2_module
+в логах могли появляться сообщения
+"[error] upstream sent frame for unknown stream"
+и
+"[crit] cache file ... contains invalid header",
+если использовалась директива proxy_cache_revalidate.
+</para>
+<para lang="en">
+"[error] upstream sent frame for unknown stream"
+and
+"[crit] cache file ... contains invalid header"
+messages might appear in logs
+when sending a cached HTTP/2 response
+in the ngx_http_proxy_v2_module
+if the "proxy_cache_revalidate" directive was used.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+nginx мог передавать заголовок "Upgrade" клиенту в ответе HTTP/2 или HTTP/3.
+</para>
+<para lang="en">
+nginx might send the "Upgrade" header line in HTTP/2 and HTTP/3 responses.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в модуле ngx_http_perl_module.<br/>
+Спасибо Максиму Дунину.
+</para>
+<para lang="en">
+in the ngx_http_perl_module.<br/>
+Thanks to Maxim Dounin.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+запрет фрагментации IPv6 мог не работать
+при использовании QUIC на некоторых системах.
+</para>
+<para lang="en">
+IPv6 fragmentation might not be disabled
+when using QUIC on some operating systems.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+в модуле ngx_http_auth_basic_module на Solaris.
+</para>
+<para lang="en">
+in the ngx_http_auth_basic_module on Solaris.
+</para>
+</change>
+
+<change>
+<para lang="ru">
+Исправления и улучшения в модуле ngx_http_tunnel_module.
+</para>
+<para lang="en">
+Bugfixes and improvements in the ngx_http_tunnel_module.
+</para>
+</change>
+
+</changes>
+
+
+<changes ver="1.31.2" date="2026-06-17">
+
+<change type="security">
+<para lang="ru">
+при использовании HTTP/3 обработка специально созданной QUIC-сессии
+могла приводить к обращению к ранее освобождённой памяти,
+что позволяло атакующему повредить память рабочего процесса
+или вызвать segmentation fault в рабочем процессе (CVE-2026-42530).<br/>
+Спасибо Trung Nguyen из CyStack.
+</para>
+<para lang="en">
+use-after-free might occur
+when using HTTP/3 and processing a specially crafted QUIC session,
+allowing an attacker to cause worker process memory corruption
+or segmentation fault in a worker process (CVE-2026-42530).<br/>
+Thanks to Trung Nguyen of CyStack.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при проксировании специально созданного запроса на HTTP/2 или gRPC-бэкенд
+с использованием директив "ignore_invalid_headers off;" и
+"large_client_header_buffers" с большим значением
+могло происходить переполнение буфера в рабочем процессе,
+что позволяло атакующему повредить память рабочего процесса
+или вызвать segmentation fault в рабочем процессе (CVE-2026-42055).<br/>
+Спасибо Mufeed VH из Winfunc Research.
+</para>
+<para lang="en">
+a heap memory buffer overflow might occur in a worker process
+when using a configuration with "ignore_invalid_headers off;"
+and "large_client_header_buffers" with large configured values
+when proxying a specially crafted request to HTTP/2 or gRPC backend,
+allowing an attacker to cause worker process memory corruption
+or segmentation fault in a worker process (CVE-2026-42055).<br/>
+Thanks to Mufeed VH of Winfunc Research.
+</para>
+</change>
+
+<change type="security">
+<para lang="ru">
+при обработке специально переданного ответа с декодированием из UTF-8
+через директиву charset_map могло происходить чтение данных
+за границами буфера рабочего процесса, что позволяло атакующему
+отправить клиенту ограниченное содержимое памяти рабочего процесса
+или вызвать segmentation fault в рабочем процессе (CVE-2026-48142).<br/>
+Спасибо Han Yan из Xiaomi и p4p3r из CYBERONE.
+</para>
+<para lang="en">
+a heap memory buffer overread might occur in a worker process
+while handling a specially sent response with decoding from UTF-8
+via the "charset_map" directive, allowing an attacker to cause
+a limited disclosure of worker proccess memory
+or segmentation fault in a worker process (CVE-2026-48142).<br/>
+Thanks to Han Yan of Xiaomi and p4p3r of CYBERONE.
+</para>
+</change>
+
+<change type="change">
+<para lang="ru">
+теперь переменная $request_id использует SipHash-2-4.
+</para>
+<para lang="en">
+now the $request_id variable uses SipHash-2-4.
+</para>
+</change>
+
+<change type="feature">
+<para lang="ru">
+переменная $ssl_sigalgs.
+</para>
+<para lang="en">
+the $ssl_sigalgs variable.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+переменная заданная директивой split_clients могла быть пустой,
+если все проценты были заданы явно и их сумма была равна 100%.
+</para>
+<para lang="en">
+a variable defined by the "split_clients" directive might be empty
+if all percentages were specified explicitly and summed up to 100%.
+</para>
+</change>
+
+<change type="bugfix">
+<para lang="ru">
+сравнение хешей secure_link за константное время.<br/>
+Спасибо kodareef5.
+</para>
+<para lang="en">
+constant time "secure_link" hash comparison.<br/>
+Thanks to kodareef5.
+</para>
+</change>
+
+</changes>
+
+
 <changes ver="1.31.1" date="2026-05-22">
 
 <change type="security">

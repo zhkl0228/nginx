@@ -6,6 +6,9 @@ on:
   pull_request:
     types: [ opened, synchronize ]
 
+permissions:
+  contents: read
+
 jobs:
   check-whitespace:
     runs-on: ubuntu-24.04
@@ -17,13 +20,13 @@ jobs:
     - name: git log --check
       run: |
         echo "## Whitespace Check Results" >${GITHUB_STEP_SUMMARY}
+        echo '```' >>${GITHUB_STEP_SUMMARY}
         err=0
         commit=
         while read dash hash subj
         do
           case "${dash}" in
           "---")
-            err=0
             commit="${hash} (\"${subj}\")"
             ;;
           "")
@@ -42,6 +45,7 @@ jobs:
             ;;
           esac
         done <<< $(git log --check --pretty=format:"--- %h %s" ${{github.event.pull_request.base.sha}}..)
+        echo '```' >>${GITHUB_STEP_SUMMARY}
 
         if test ${err} -ne 0
         then
