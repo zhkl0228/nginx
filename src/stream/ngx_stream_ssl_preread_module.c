@@ -41,6 +41,7 @@ typedef struct ngx_ssl_ja3_s {
     u_short         *ciphers;
 
     size_t          extensions_sz;
+    size_t          extensions_cap;
     u_short         *extensions;
 
     size_t          curves_sz;
@@ -515,7 +516,6 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
             if (ctx->log->log_level >= NGX_LOG_DEBUG) {
                 u_char  *raw_hex;
                 u_char  random_hex[REALITY_RANDOM_SIZE * 2 + 1];
-                u_char  session_id_hex[REALITY_SESSION_ID_SIZE * 2 + 1];
 
                 if (ctx->raw.data != NULL && ctx->raw.len > 0) {
                     raw_hex = ngx_pnalloc(ctx->pool, ctx->raw.len * 2 + 1);
@@ -536,6 +536,17 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
                 random_hex[REALITY_RANDOM_SIZE * 2] = '\0';
 
                 if (ctx->session_id.data != NULL && ctx->session_id.len > 0) {
+                    u_char  *session_id_hex;
+
+                    /* session_id length is a wire byte: up to 255, which is far
+                       more than REALITY_SESSION_ID_SIZE.  Size the hex buffer
+                       from the actual length instead of a fixed array. */
+                    session_id_hex = ngx_pnalloc(ctx->pool,
+                                                 ctx->session_id.len * 2 + 1);
+                    if (session_id_hex == NULL) {
+                        return NGX_ERROR;
+                    }
+
                     ngx_hex_dump(session_id_hex, ctx->session_id.data, ctx->session_id.len);
                     session_id_hex[ctx->session_id.len * 2] = '\0';
 
@@ -647,6 +658,7 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
 
         case sw_start:
             ctx->ja3.extensions_sz = 0;
+            ctx->ja3.extensions_cap = 0;
             ctx->ja3.extensions = NULL;
             state = sw_header;
             dst = p;
@@ -743,10 +755,30 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
 
             if (ctx->ja3.extensions_sz == 0 && ctx->ja3.extensions == NULL) {
                 size_t ext_size = (p[0] << 8) + p[1];
-                /* each extension occupies at least 4 wire bytes (type+len),
-                   so capacity in u_short slots is ext_size/4 + 1 for safety */
+
+                /* The extensions block is the last field of the ClientHello,
+                   so its declared length must account for exactly what is left
+                   of the handshake body.  Anything else is a lie about a
+                   length: refuse it here rather than parse whatever follows as
+                   extension headers. */
+                if (ext_size != left) {
+                    ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                   "ssl preread: extensions length %uz does not "
+                                   "match remaining ClientHello body %uz",
+                                   ext_size, left);
+                    return NGX_DECLINED;
+                }
+
+                /* Every extension costs at least 4 wire bytes (type + length),
+                   so ext_size bytes hold at most ext_size / 4 of them.  The
+                   capacity is remembered because the loop below is bounded by
+                   "left", not by ext_size: an inner list length that disagrees
+                   with its extension body desyncs the parser mid-way and would
+                   otherwise keep appending past the end of this allocation. */
+                ctx->ja3.extensions_cap = ext_size / 4;
                 ctx->ja3.extensions = ngx_pnalloc(ctx->pool,
-                                                  (ext_size / 4 + 1) * sizeof(u_short));
+                                                  (ctx->ja3.extensions_cap + 1)
+                                                  * sizeof(u_short));
                 if (ctx->ja3.extensions == NULL) {
                     return NGX_ERROR;
                 }
@@ -758,6 +790,18 @@ ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf, ngx
 
         case sw_ext_header:
             if (ctx->ja3.extensions) {
+                if (ctx->ja3.extensions_sz >= ctx->ja3.extensions_cap) {
+                    /* More extension headers than the declared extensions block
+                       can possibly contain.  Writing one more would run past
+                       the allocation and corrupt the heap, so refuse the
+                       ClientHello instead. */
+                    ngx_log_debug2(NGX_LOG_DEBUG_STREAM, ctx->log, 0,
+                                   "ssl preread: extension count exceeds "
+                                   "declared block (cap=%uz, type=%ui)",
+                                   ctx->ja3.extensions_cap,
+                                   (ngx_uint_t) ((p[0] << 8) + p[1]));
+                    return NGX_DECLINED;
+                }
                 ctx->ja3.extensions[ctx->ja3.extensions_sz++] = (p[0] << 8) + p[1];
             }
             if (p[0] == 0 && p[1] == 0 && ctx->host.data == NULL) {
