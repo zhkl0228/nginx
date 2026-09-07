@@ -1436,15 +1436,39 @@ ngx_http_ssl_init(ngx_conf_t *cf)
             if (addr[a].opt.quic) {
                 name = "quic";
 
-#if (NGX_QUIC_OPENSSL_COMPAT)
-                if (ngx_http_ssl_quic_compat_init(cf, &addr[a]) != NGX_OK) {
-                    return NGX_ERROR;
-                }
-#endif
-
             } else {
                 name = "ssl";
             }
+
+#if (NGX_QUIC_OPENSSL_COMPAT)
+
+            /*
+             * The compatibility layer registers a custom TLS extension on the
+             * contexts it initializes, and OpenSSL derives two different sizes
+             * from the custom extension count of "the current context": the
+             * array of collected ClientHello extensions is allocated when the
+             * ClientHello arrives, while the loop that parses it is bounded
+             * once parsing starts.  Virtual server selection runs in between,
+             * in the ClientHello callback, where SSL_set_SSL_CTX() installs
+             * the context of the server the SNI resolved to.  If that context
+             * carries the extension and the one the connection started on does
+             * not, the parsing loop walks one element past the end of the
+             * array - an out of bounds read of RAW_EXTENSION.present and, when
+             * that byte is not zero, an out of bounds write of .parsed, which
+             * corrupts whatever allocation follows.
+             *
+             * Registering the extension on every SSL context, not just on the
+             * ones reachable over QUIC, keeps the count identical across such
+             * a switch.  Contexts that never serve QUIC are unaffected on the
+             * wire: every compat callback returns early unless the connection
+             * is a datagram one.
+             */
+
+            if (ngx_http_ssl_quic_compat_init(cf, &addr[a]) != NGX_OK) {
+                return NGX_ERROR;
+            }
+
+#endif
 
             cscf = addr[a].default_server;
             sscf = cscf->ctx->srv_conf[ngx_http_ssl_module.ctx_index];
