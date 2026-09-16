@@ -29,9 +29,23 @@
 
 #define PROLOGUE_SIZE 32
 
+/* MTProxy FakeTLS: the client proves knowledge of the proxy secret by
+ * setting ClientHello.random to HMAC-SHA256(secret, record) XOR
+ * (28 zero bytes || little-endian timestamp), where "record" is the whole
+ * ClientHello record (5-byte header included) with random zeroed. */
+#define MTPROXY_SECRET_SIZE 16
+#define MTPROXY_RECORD_HEADER_SIZE 5
+#define MTPROXY_DIGEST_SIZE 32
+#define MTPROXY_DIGEST_ZERO_SIZE 28
+
+/* Offset of random within ClientHello body (no record header):
+ *   msg_type(1) + length(3) + version(2) = 6 */
+#define MTPROXY_RANDOM_OFFSET 6
+
 typedef struct {
     ngx_flag_t      enabled;
     ngx_str_t       reality_key;
+    ngx_str_t       mtproxy_secret;
 } ngx_stream_ssl_preread_srv_conf_t;
 
 
@@ -75,6 +89,9 @@ typedef struct {
     ngx_str_t       public_key;
     u_char          reality_short_id[REALITY_SHORT_ID_SIZE];
     ngx_flag_t      reality_decrypted;
+    u_char          record_header[MTPROXY_RECORD_HEADER_SIZE];
+    ngx_uint_t      records;
+    ngx_str_t       mtproxy_state;
 } ngx_stream_ssl_preread_ctx_t;
 
 static ngx_int_t
@@ -204,7 +221,14 @@ ngx_stream_reality_decrypt_short_id(ngx_stream_ssl_preread_ctx_t *ctx,
     uint32_t *timestamp, ngx_log_t *log);
 #endif
 
+#if (NGX_OPENSSL)
+static ngx_int_t
+ngx_stream_mtproxy_verify(ngx_stream_ssl_preread_ctx_t *ctx,
+    u_char *secret, ngx_str_t *state, ngx_log_t *log);
+#endif
+
 static ngx_flag_t is_reality_key_valid(ngx_stream_ssl_preread_srv_conf_t *sscf);
+static ngx_flag_t is_mtproxy_secret_valid(ngx_stream_ssl_preread_srv_conf_t *sscf);
 static ngx_int_t ngx_stream_ssl_preread_handler(ngx_stream_session_t *s);
 static ngx_int_t ngx_stream_ssl_preread_parse_record(ngx_stream_ssl_preread_srv_conf_t *sscf,
     ngx_stream_ssl_preread_ctx_t *ctx, u_char *pos, u_char *last);
@@ -217,6 +241,8 @@ static ngx_int_t ngx_stream_ssl_preread_server_name_variable(
 static ngx_int_t ngx_stream_ssl_preread_alpn_protocols_variable(
     ngx_stream_session_t *s, ngx_stream_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_stream_ssl_preread_reality_short_id_variable(
+    ngx_stream_session_t *s, ngx_stream_variable_value_t *v, uintptr_t data);
+static ngx_int_t ngx_stream_ssl_preread_mtproxy_variable(
     ngx_stream_session_t *s, ngx_stream_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_stream_ssl_preread_add_variables(ngx_conf_t *cf);
 static void *ngx_stream_ssl_preread_create_srv_conf(ngx_conf_t *cf);
@@ -398,6 +424,10 @@ static ngx_stream_variable_t  ngx_stream_ssl_preread_vars[] = {
     { ngx_string("ssl_preread_reality_short_id"), NULL,
       ngx_stream_ssl_preread_reality_short_id_variable, 0, 0, 0 },
 
+    /* MTProxy FakeTLS verification result (16 chars) */
+    { ngx_string("ssl_preread_mtproxy"), NULL,
+      ngx_stream_ssl_preread_mtproxy_variable, 0, 0, 0 },
+
       ngx_stream_null_variable
 };
 
@@ -487,6 +517,12 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
             break;
         }
 
+        /* keep the header of the record being parsed: when the ClientHello
+           fits in a single record (the only shape FakeTLS uses) this is the
+           header the MTProxy HMAC covers */
+        ngx_memcpy(ctx->record_header, p, MTPROXY_RECORD_HEADER_SIZE);
+        ctx->records++;
+
         p += 5;
 
         rc = ngx_stream_ssl_preread_parse_record(sscf, ctx, p, p + len);
@@ -501,7 +537,7 @@ ngx_stream_ssl_preread_handler(ngx_stream_session_t *s)
                 ngx_sort_ext(ctx->ja3.extensions, ctx->ja3.extensions_sz);
             }
 
-            if (is_reality_key_valid(sscf)) {
+            if (is_reality_key_valid(sscf) || is_mtproxy_secret_valid(sscf)) {
                 /* save raw ClientHello record (without 5-byte TLS header);
                    only commit len after a successful allocation so downstream
                    code can rely on (data != NULL) iff (len > 0) */
@@ -1230,6 +1266,14 @@ is_reality_key_valid(ngx_stream_ssl_preread_srv_conf_t *sscf)
     }
 }
 
+static ngx_flag_t
+is_mtproxy_secret_valid(ngx_stream_ssl_preread_srv_conf_t *sscf)
+{
+    /* merge_srv_conf leaves an unset secret as "" (non-NULL data), so the
+       length is the only reliable "configured" test */
+    return sscf->mtproxy_secret.len == MTPROXY_SECRET_SIZE;
+}
+
 static ngx_int_t
 ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
     ngx_stream_variable_value_t *v, uintptr_t data)
@@ -1316,6 +1360,59 @@ ngx_stream_ssl_preread_reality_short_id_variable(ngx_stream_session_t *s,
 
 
 static ngx_int_t
+ngx_stream_ssl_preread_mtproxy_variable(ngx_stream_session_t *s,
+    ngx_stream_variable_value_t *v, uintptr_t data)
+{
+    ngx_str_t                           reason;
+    ngx_stream_ssl_preread_ctx_t       *ctx;
+    ngx_stream_ssl_preread_srv_conf_t  *sscf;
+
+    ctx = ngx_stream_get_module_ctx(s, ngx_stream_ssl_preread_module);
+    sscf = ngx_stream_get_module_srv_conf(s, ngx_stream_ssl_preread_module);
+
+    /* Same contract as $ssl_preread_reality_short_id: absent when no
+       mtproxy= secret is configured, otherwise always exactly 16 characters.
+       The success value is a long literal on purpose: it is matched inside
+       concatenated map keys, where a short token such as "ok" could also
+       occur as a substring of an SNI, an ALPN list or another variable. */
+    if (!is_mtproxy_secret_valid(sscf)) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    v->valid = 1;
+    v->no_cacheable = 1;
+    v->not_found = 0;
+
+    if (ctx == NULL || !ctx->is_ssl) {
+        ngx_str_set(&reason, "no-tls----------");
+        v->data = reason.data;
+        v->len = reason.len;
+        return NGX_OK;
+    }
+
+#if (NGX_OPENSSL)
+    /* verify on first access, the result is kept for later lookups
+       (map key and access log evaluate the variable separately) */
+    if (ctx->mtproxy_state.data == NULL) {
+        if (ngx_stream_mtproxy_verify(ctx, sscf->mtproxy_secret.data,
+                                      &ctx->mtproxy_state,
+                                      s->connection->log)
+            != NGX_OK)
+        {
+            return NGX_ERROR;
+        }
+    }
+#endif
+
+    v->data = ctx->mtproxy_state.data;
+    v->len = ctx->mtproxy_state.len;
+
+    return NGX_OK;
+}
+
+
+static ngx_int_t
 ngx_stream_ssl_preread_add_variables(ngx_conf_t *cf)
 {
     ngx_stream_variable_t  *var, *v;
@@ -1346,6 +1443,7 @@ ngx_stream_ssl_preread_create_srv_conf(ngx_conf_t *cf)
 
     conf->enabled = NGX_CONF_UNSET;
     ngx_str_null(&conf->reality_key);
+    ngx_str_null(&conf->mtproxy_secret);
 
     return conf;
 }
@@ -1359,6 +1457,7 @@ ngx_stream_ssl_preread_merge_srv_conf(ngx_conf_t *cf, void *parent, void *child)
 
     ngx_conf_merge_value(conf->enabled, prev->enabled, 0);
     ngx_conf_merge_str_value(conf->reality_key, prev->reality_key, "");
+    ngx_conf_merge_str_value(conf->mtproxy_secret, prev->mtproxy_secret, "");
 
     return NGX_CONF_OK;
 }
@@ -1428,6 +1527,54 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 #endif
         }
 
+        if (ngx_strncmp(value[i].data, "mtproxy=", 8) == 0) {
+#if (NGX_OPENSSL && OPENSSL_VERSION_NUMBER >= 0x10100000L)
+            u_char     *secret;
+            ngx_int_t   byte;
+            ngx_uint_t  n;
+
+            if (sscf->mtproxy_secret.data != NULL) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                  "duplicate \"mtproxy=\" parameter");
+                return NGX_CONF_ERROR;
+            }
+
+            /* the raw 16-byte secret in hex, i.e. the part of an "ee..."
+               FakeTLS link between the "ee" prefix and the domain */
+            if (value[i].len - 8 != MTPROXY_SECRET_SIZE * 2) {
+                ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                  "mtproxy secret must be %d hex characters "
+                                  "(got %uz)",
+                                  MTPROXY_SECRET_SIZE * 2, value[i].len - 8);
+                return NGX_CONF_ERROR;
+            }
+
+            secret = ngx_pnalloc(cf->pool, MTPROXY_SECRET_SIZE);
+            if (secret == NULL) {
+                return NGX_CONF_ERROR;
+            }
+
+            for (n = 0; n < MTPROXY_SECRET_SIZE; n++) {
+                byte = ngx_hextoi(value[i].data + 8 + n * 2, 2);
+                if (byte == NGX_ERROR) {
+                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                                      "invalid hex in mtproxy parameter");
+                    return NGX_CONF_ERROR;
+                }
+                secret[n] = (u_char) byte;
+            }
+
+            sscf->mtproxy_secret.data = secret;
+            sscf->mtproxy_secret.len = MTPROXY_SECRET_SIZE;
+            continue;
+#else
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                              "\"mtproxy=\" parameter requires nginx to be "
+                              "built with OpenSSL 1.1.0+ (or LibreSSL)");
+            return NGX_CONF_ERROR;
+#endif
+        }
+
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
                           "invalid parameter \"%V\"", &value[i]);
         return NGX_CONF_ERROR;
@@ -1443,11 +1590,13 @@ ngx_stream_ssl_preread(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
        whether it is configured so the operator can confirm the directive
        was parsed. */
     ngx_conf_log_error(NGX_LOG_DEBUG, cf, 0,
-                      "ssl_preread: enabled=%d, reality_key=%s (len=%uz)",
+                      "ssl_preread: enabled=%d, reality_key=%s (len=%uz), "
+                      "mtproxy_secret=%s",
                       sscf->enabled,
                       (sscf->reality_key.data != NULL
                        && sscf->reality_key.len > 0) ? "set" : "(empty)",
-                      sscf->reality_key.len);
+                      sscf->reality_key.len,
+                      sscf->mtproxy_secret.data != NULL ? "set" : "(empty)");
 
     return NGX_CONF_OK;
 }
@@ -1780,5 +1929,124 @@ cleanup:
 
     return rc;
 #endif  /* OPENSSL_VERSION_NUMBER >= 0x10100000L */
+}
+
+
+/*
+ * Verify an MTProxy FakeTLS ClientHello.
+ *
+ * Mirrors the check done by the MTProxy server (FakeTlsHandshaker in pac):
+ * a single handshake record starting with 16 03 01, holding exactly one
+ * ClientHello with legacy_version 03 03, whose random is
+ * HMAC-SHA256(secret, record with random zeroed) XOR (28 zero bytes ||
+ * timestamp).  The timestamp is not checked, same as the MTProxy side.
+ *
+ * On return *state is one of the 16-character values of
+ * $ssl_preread_mtproxy.  NGX_ERROR means the crypto library failed, not
+ * that the ClientHello was rejected.
+ */
+static ngx_int_t
+ngx_stream_mtproxy_verify(ngx_stream_ssl_preread_ctx_t *ctx,
+    u_char *secret, ngx_str_t *state, ngx_log_t *log)
+{
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
+    /* unreachable: the mtproxy= parameter is rejected at configuration time */
+    return NGX_ERROR;
+#else
+    static const u_char  zero[MTPROXY_DIGEST_SIZE] = { 0 };
+
+    u_char     *hdr, *raw, mac[EVP_MAX_MD_SIZE];
+    size_t      body_len, after_random;
+    unsigned    mac_len;
+    ngx_uint_t  i;
+    HMAC_CTX   *hmac;
+
+    hdr = ctx->record_header;
+    raw = ctx->raw.data;
+
+    /* FakeTLS always sends the ClientHello as one record; with several
+       records ctx->raw holds only the last one and the HMAC input is gone */
+    if (ctx->records != 1 || raw == NULL
+        || ctx->raw.len < MTPROXY_RANDOM_OFFSET + MTPROXY_DIGEST_SIZE)
+    {
+        ngx_log_debug3(NGX_LOG_DEBUG_STREAM, log, 0,
+                       "mtproxy: not a single-record ClientHello "
+                       "(records=%ui, raw=%p, raw.len=%uz)",
+                       ctx->records, raw, ctx->raw.len);
+        ngx_str_set(state, "no-faketls------");
+        return NGX_OK;
+    }
+
+    body_len = ((size_t) raw[1] << 16) + ((size_t) raw[2] << 8) + raw[3];
+
+    if (hdr[0] != 0x16 || hdr[1] != 0x03 || hdr[2] != 0x01
+        || ctx->raw.len < 0xff
+        || body_len + 4 != ctx->raw.len
+        || raw[4] != 0x03 || raw[5] != 0x03)
+    {
+        ngx_log_debug8(NGX_LOG_DEBUG_STREAM, log, 0,
+                       "mtproxy: ClientHello shape mismatch "
+                       "(record=%02xd%02xd%02xd, record.len=%uz, "
+                       "handshake.len=%uz, legacy_version=%02xd%02xd, "
+                       "records=%ui)",
+                       hdr[0], hdr[1], hdr[2], ctx->raw.len, body_len,
+                       raw[4], raw[5], ctx->records);
+        ngx_str_set(state, "no-faketls------");
+        return NGX_OK;
+    }
+
+    hmac = HMAC_CTX_new();
+    if (hmac == NULL) {
+        ngx_log_error(NGX_LOG_ALERT, log, 0, "mtproxy: HMAC_CTX_new() failed");
+        return NGX_ERROR;
+    }
+
+    after_random = MTPROXY_RANDOM_OFFSET + MTPROXY_DIGEST_SIZE;
+
+    if (HMAC_Init_ex(hmac, secret, MTPROXY_SECRET_SIZE, EVP_sha256(), NULL)
+            != 1
+        || HMAC_Update(hmac, hdr, MTPROXY_RECORD_HEADER_SIZE) != 1
+        || HMAC_Update(hmac, raw, MTPROXY_RANDOM_OFFSET) != 1
+        || HMAC_Update(hmac, zero, MTPROXY_DIGEST_SIZE) != 1
+        || HMAC_Update(hmac, raw + after_random,
+                       ctx->raw.len - after_random) != 1
+        || HMAC_Final(hmac, mac, &mac_len) != 1)
+    {
+        HMAC_CTX_free(hmac);
+        ngx_log_error(NGX_LOG_ALERT, log, 0, "mtproxy: HMAC-SHA256 failed");
+        return NGX_ERROR;
+    }
+
+    HMAC_CTX_free(hmac);
+
+    if (mac_len != MTPROXY_DIGEST_SIZE) {
+        ngx_log_error(NGX_LOG_ALERT, log, 0,
+                      "mtproxy: unexpected HMAC-SHA256 length %ud", mac_len);
+        return NGX_ERROR;
+    }
+
+    for (i = 0; i < MTPROXY_DIGEST_SIZE; i++) {
+        mac[i] ^= raw[MTPROXY_RANDOM_OFFSET + i];
+    }
+
+    if (CRYPTO_memcmp(mac, zero, MTPROXY_DIGEST_ZERO_SIZE) != 0) {
+        ngx_log_debug0(NGX_LOG_DEBUG_STREAM, log, 0,
+                       "mtproxy: digest mismatch");
+        ngx_str_set(state, "no-digest-------");
+
+    } else {
+        /* the last 4 bytes carry the client's little-endian unix time */
+        ngx_log_debug1(NGX_LOG_DEBUG_STREAM, log, 0,
+                       "mtproxy: digest verified, timestamp=%uD",
+                       (uint32_t) mac[28] | ((uint32_t) mac[29] << 8)
+                       | ((uint32_t) mac[30] << 16)
+                       | ((uint32_t) mac[31] << 24));
+        ngx_str_set(state, "mtproxy-verified");
+    }
+
+    ngx_memzero(mac, sizeof(mac));
+
+    return NGX_OK;
+#endif
 }
 #endif  /* NGX_OPENSSL */

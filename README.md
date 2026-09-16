@@ -18,7 +18,7 @@ Enterprise distributions, commercial support and training are available from [F5
 > [!IMPORTANT]
 > The goal of this README is to provide a basic, structured introduction to NGINX for novice users. Please refer to the [full NGINX documentation](https://nginx.org/en/docs/) for detailed information on [installing](https://nginx.org/en/docs/install.html), [building](https://nginx.org/en/docs/configure.html), [configuring](https://nginx.org/en/docs/dirindex.html), [debugging](https://nginx.org/en/docs/debugging_log.html), and more. These documentation pages also contain a more detailed [Beginners Guide](https://nginx.org/en/docs/beginners_guide.html), How-Tos, [Development guide](https://nginx.org/en/docs/dev/development_guide.html), and a complete module and [directive reference](https://nginx.org/en/docs/dirindex.html).
 
-# Fork additions: REALITY / JA3 in `ngx_stream_ssl_preread_module`
+# Fork additions: REALITY / MTProxy / JA3 in `ngx_stream_ssl_preread_module`
 
 This fork extends the upstream `ngx_stream_ssl_preread_module` (Stream module) with
 ClientHello inspection that is useful for traffic shaping based on JA3N
@@ -31,8 +31,15 @@ block.
 ## Directive
 
 ```nginx
-ssl_preread on | off [reality=<base64url-encoded-32-byte-private-key>];
+ssl_preread on | off [reality=<base64url-encoded-32-byte-private-key>]
+                     [mtproxy=<32-hex-char-secret>];
 ```
+
+The `mtproxy=` parameter is optional.  Its value is the raw 16-byte MTProxy
+secret in hex — in an `ee…` FakeTLS link, the 32 hex characters between the
+`ee` prefix and the hex-encoded domain.  It enables
+`$ssl_preread_mtproxy` (below).  Like `reality=`, it requires an OpenSSL
+(1.1.0+) or LibreSSL build.
 
 The `reality=` parameter is optional.  When present, its value is a
 [base64url](https://datatracker.ietf.org/doc/html/rfc4648#section-5)-encoded
@@ -66,6 +73,7 @@ Variables added by this fork:
 | `$ssl_preread_ja3n_hash` | MD5 of `$ssl_preread_ja3n` (32 hex chars) |
 | `$ssl_preread_prologue` | hex dump of the first 32 ClientHello bytes |
 | `$ssl_preread_reality_short_id` | see below — **requires OpenSSL build** |
+| `$ssl_preread_mtproxy` | see below — **requires OpenSSL build** |
 
 ### `$ssl_preread_reality_short_id` semantics
 
@@ -149,6 +157,54 @@ Sample log lines:
 203.0.113.7  www.example.com  status=ok    short_id=0123456789abcdef
 198.51.100.4 www.example.com  status=fail  short_id=no-decrypt------
 192.0.2.9    -                status=fail  short_id=no-tls----------
+```
+
+### `$ssl_preread_mtproxy` semantics
+
+Tells a real MTProxy FakeTLS client apart from a browser that happens to share
+its TLS fingerprint (Telegram's FakeTLS ClientHello copies e.g. Safari's, so
+JA3N alone cannot route it).  The client proves it knows the secret by setting
+`ClientHello.random` to `HMAC-SHA256(secret, record) XOR (28 zero bytes ||
+little-endian unix time)`, where `record` is the whole ClientHello record,
+5-byte header included, with `random` replaced by zeros.  The module checks
+exactly that; the timestamp is logged at debug level but not enforced, same as
+the MTProxy server.
+
+Like `$ssl_preread_reality_short_id`, the value is **always exactly 16
+characters** when `mtproxy=` is configured.  The success value is a long
+literal rather than something like `ok`, so a map rule anchored on it cannot
+accidentally match an SNI, an ALPN list or another variable when several
+variables are concatenated into one map key.
+
+| Configuration / connection state | `$ssl_preread_mtproxy` |
+|---|---|
+| `mtproxy=` **not** supplied to `ssl_preread` | variable is **absent** (`not_found`) |
+| `mtproxy=` supplied; digest verified | `"mtproxy-verified"` |
+| no TLS ClientHello (non-TLS, or no preread context) | `"no-tls----------"` |
+| TLS, but not FakeTLS-shaped: ClientHello spread over several records, record header not `16 03 01`, record shorter than 255 bytes, extra data after the ClientHello, or legacy_version not `03 03` | `"no-faketls------"` |
+| FakeTLS-shaped, but the HMAC does not match (an ordinary browser, a wrong secret, or tampering) | `"no-digest-------"` |
+
+A replayed ClientHello of a real client still verifies; the MTProxy server
+behind it is expected to deal with that, as it would without nginx in front.
+
+## Example: send MTProxy to its backend, same-fingerprint browsers to the site
+
+```nginx
+stream {
+    map "$ssl_preread_mtproxy,$ssl_preread_server_name" $name {
+        "~^mtproxy-verified,"  mtproxy;
+        default                https;
+    }
+
+    upstream mtproxy { server 127.0.0.1:44445; }
+    upstream https   { server 127.0.0.1:8443; }
+
+    server {
+        listen 443;
+        ssl_preread on mtproxy=00112233445566778899aabbccddeeff;
+        proxy_pass $name;
+    }
+}
 ```
 
 ## Example: log JA3N for fingerprint analytics
