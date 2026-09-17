@@ -1379,6 +1379,9 @@ static ngx_int_t
 ngx_http_ssl_init(ngx_conf_t *cf)
 {
     ngx_uint_t                   a, p, s;
+#if (NGX_QUIC_OPENSSL_COMPAT)
+    ngx_uint_t                   compat;
+#endif
     const char                  *name;
     ngx_http_conf_addr_t        *addr;
     ngx_http_conf_port_t        *port;
@@ -1423,6 +1426,25 @@ ngx_http_ssl_init(ngx_conf_t *cf)
         return NGX_OK;
     }
 
+#if (NGX_QUIC_OPENSSL_COMPAT)
+
+    compat = 0;
+
+    port = cmcf->ports->elts;
+    for (p = 0; p < cmcf->ports->nelts && !compat; p++) {
+
+        addr = port[p].addrs.elts;
+        for (a = 0; a < port[p].addrs.nelts; a++) {
+
+            if (addr[a].opt.quic) {
+                compat = 1;
+                break;
+            }
+        }
+    }
+
+#endif
+
     port = cmcf->ports->elts;
     for (p = 0; p < cmcf->ports->nelts; p++) {
 
@@ -1433,42 +1455,20 @@ ngx_http_ssl_init(ngx_conf_t *cf)
                 continue;
             }
 
+#if (NGX_QUIC_OPENSSL_COMPAT)
+            if (compat) {
+                if (ngx_http_ssl_quic_compat_init(cf, &addr[a]) != NGX_OK) {
+                    return NGX_ERROR;
+                }
+            }
+#endif
+
             if (addr[a].opt.quic) {
                 name = "quic";
 
             } else {
                 name = "ssl";
             }
-
-#if (NGX_QUIC_OPENSSL_COMPAT)
-
-            /*
-             * The compatibility layer registers a custom TLS extension on the
-             * contexts it initializes, and OpenSSL derives two different sizes
-             * from the custom extension count of "the current context": the
-             * array of collected ClientHello extensions is allocated when the
-             * ClientHello arrives, while the loop that parses it is bounded
-             * once parsing starts.  Virtual server selection runs in between,
-             * in the ClientHello callback, where SSL_set_SSL_CTX() installs
-             * the context of the server the SNI resolved to.  If that context
-             * carries the extension and the one the connection started on does
-             * not, the parsing loop walks one element past the end of the
-             * array - an out of bounds read of RAW_EXTENSION.present and, when
-             * that byte is not zero, an out of bounds write of .parsed, which
-             * corrupts whatever allocation follows.
-             *
-             * Registering the extension on every SSL context, not just on the
-             * ones reachable over QUIC, keeps the count identical across such
-             * a switch.  Contexts that never serve QUIC are unaffected on the
-             * wire: every compat callback returns early unless the connection
-             * is a datagram one.
-             */
-
-            if (ngx_http_ssl_quic_compat_init(cf, &addr[a]) != NGX_OK) {
-                return NGX_ERROR;
-            }
-
-#endif
 
             cscf = addr[a].default_server;
             sscf = cscf->ctx->srv_conf[ngx_http_ssl_module.ctx_index];
@@ -1538,8 +1538,12 @@ ngx_http_ssl_quic_compat_init(ngx_conf_t *cf, ngx_http_conf_addr_t *addr)
         sscf = cscf->ctx->srv_conf[ngx_http_ssl_module.ctx_index];
 
         if (sscf->certificates || sscf->reject_handshake) {
-            if (ngx_quic_compat_init(cf, sscf->ssl.ctx) != NGX_OK) {
+            if (ngx_quic_compat_ext_init(cf, sscf->ssl.ctx) != NGX_OK) {
                 return NGX_ERROR;
+            }
+
+            if (addr->opt.quic) {
+                ngx_quic_compat_keylog_init(sscf->ssl.ctx);
             }
         }
     }
